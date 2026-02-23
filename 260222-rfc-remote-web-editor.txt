@@ -1,0 +1,145 @@
+
+
+
+
+Network Working Group                                            WR
+Request for Comments: 2026-0222                          Home Office
+Category: Informational                             22 February 2026
+
+
+       Remote Web Editor Workflow for cmux via OpenVSCode Server
+
+Status of This Memo
+
+   This memo defines a workflow for browsing and editing remote
+   files inside the cmux browser panel using openvscode-server,
+   forwarded over an SSH tunnel.
+
+Table of Contents
+
+   1. Introduction ................................................ 1
+   2. Motivation .................................................. 1
+   3. Workflow .................................................... 2
+   4. Security Model .............................................. 3
+   5. Troubleshooting ............................................. 3
+   6. Future Work ................................................. 4
+   Appendix A. Offline Install Fallback ........................... 4
+
+1.  Introduction
+
+   cmux users need a way to inspect and edit files on remote hosts,
+   particularly when reviewing changes made by coding agents.
+   Rather than building a native file UI, this memo leverages
+   openvscode-server [1] running on the remote host, tunneled via
+   SSH, and opened in the cmux built-in browser.
+
+   This approach requires only user-level SSH access and no public
+   port exposure.
+
+2.  Motivation
+
+   The workflow addresses three needs:
+
+      1. Inspect files modified by coding agents.
+      2. Edit files directly during review.
+      3. Work on both local and remote hosts.
+
+   A web editor inside the existing cmux browser is the shortest
+   path to value without native UI changes.
+
+3.  Workflow
+
+   3.1.  One-Time Install on Remote Host
+
+      VERSION="1.96.4"
+      ARCH="x64"
+
+      ssh user@remote 'bash -s' << 'EOF'
+        set -euo pipefail
+        mkdir -p ~/.local ~/.local/bin
+        curl -fsSL \
+          "https://github.com/gitpod-io/openvscode-server/\
+      releases/download/openvscode-server-v${VERSION}/\
+      openvscode-server-v${VERSION}-linux-${ARCH}.tar.gz" \
+          | tar -xz -C ~/.local/
+        ln -sf ~/.local/openvscode-server-v${VERSION}-linux-${ARCH}\
+      /bin/openvscode-server ~/.local/bin/ovscode
+      EOF
+
+   3.2.  Start Server (Loopback Only)
+
+      TOKEN=$(openssl rand -hex 16)
+
+      ssh user@remote "~/.local/bin/ovscode \
+        --host 127.0.0.1 \
+        --port 3000 \
+        --connection-token ${TOKEN} \
+        --default-folder ~/project"
+
+   3.3.  SSH Tunnel
+
+      ssh -N -L 3000:127.0.0.1:3000 user@remote
+
+   3.4.  Open in cmux Browser
+
+      cmux browser open "http://127.0.0.1:3000/?tkn=${TOKEN}"
+
+   3.5.  Operational Notes
+
+      - If port 3000 is busy, use an alternate high port on both
+        the remote and local sides.
+      - --default-folder SHOULD point to the target workspace.
+      - For persistent use, run server under systemd --user.
+
+4.  Security Model
+
+   4.1.  Required Defaults
+
+      - Bind to 127.0.0.1 on remote (--host 127.0.0.1).
+      - Use a per-session random --connection-token.
+      - Access ONLY through SSH tunnel (ssh -L).
+
+   4.2.  Operational Guardrails
+
+      - Do NOT bind to 0.0.0.0.
+      - Rotate token per session.
+      - Keep tunnels short-lived unless intentionally persistent.
+
+5.  Troubleshooting
+
+   Problem                  Cause                    Fix
+   -----------------------  -----------------------  ----------------
+   403 at root URL          Token missing/wrong      Add ?tkn=<token>
+   Tunnel fails to bind     Local port in use        Change local port
+   Blank page/disconnect    SSH tunnel dropped       Restart tunnel
+   Wrong folder opens       Invalid --default-folder Set valid path
+
+6.  Future Work
+
+   This workflow MAY be wrapped in native cmux commands:
+
+      cmux files open --ssh user@host --path /repo --tool openvscode
+      cmux files list
+      cmux files close [--id ...]
+
+   Expected behavior: bootstrap tool if missing, start remote
+   process with loopback bind + token, open tunnel, launch browser,
+   and track lifecycle for cleanup.
+
+Appendix A.  Offline Install Fallback
+
+   If the remote host has poor GitHub connectivity:
+
+      1. Download the tarball locally.
+      2. scp tarball to remote.
+      3. Extract and symlink ~/.local/bin/ovscode.
+
+References
+
+   [1] https://github.com/gitpod-io/openvscode-server
+
+Author's Address
+
+   WR
+   Home Office
+   22 February 2026
