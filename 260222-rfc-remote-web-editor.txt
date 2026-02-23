@@ -51,8 +51,11 @@ Table of Contents
 
    3.1.  One-Time Install on Remote Host
 
-      VERSION="1.96.4"
-      ARCH="x64"
+      Obtain the latest release version from [1] and set VERSION
+      accordingly.  At time of writing the latest is 1.96.4.
+
+      VERSION="<latest>"   # e.g. "1.96.4"; check [1] for current
+      ARCH="x64"           # or "arm64" for ARM hosts
 
       ssh user@remote 'bash -s' << 'EOF'
         set -euo pipefail
