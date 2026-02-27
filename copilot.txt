@@ -1,1 +1,198 @@
 https://docs.github.com/en/enterprise-cloud@latest/rest/copilot/copilot-usage-metrics?apiVersion=2022-11-28
+
+
+
+
+Good question. There are a few ways to verify directly from LiteLLM's side without checking the web dashboard.
+
+## 1. LiteLLM Verbose Logging
+
+The patch already calls `verbose_logger.debug` when setting X-Initiator. Enable it:
+
+```bash
+# Start litellm with debug logging
+litellm --config config.yaml --detailed_debug
+```
+
+Then grep for the relevant lines:
+
+```bash
+litellm --config config.yaml --detailed_debug 2>&1 | grep -E "X-Initiator|initiator"
+```
+
+You should see lines like:
+
+```
+GitHub Copilot Responses API: X-Initiator=user     ← first prompt (costs 1 PR)
+GitHub Copilot Responses API: X-Initiator=agent    ← tool call follow-up (free)
+GitHub Copilot Responses API: X-Initiator=agent    ← another follow-up (free)
+```
+
+If you see `X-Initiator=user` appearing multiple times in a single agentic session, the patch isn't working.
+
+## 2. Add a Request Hook to LiteLLM
+
+This is the most reliable method — intercept every outgoing request and log the actual headers being sent:
+
+```python
+# save as litellm_debug_hook.py
+import litellm
+import json
+from datetime import datetime
+
+def log_copilot_request(kwargs, completion_response, start_time, end_time):
+    """LiteLLM success callback that logs Copilot-specific headers."""
+    headers = kwargs.get("additional_headers", {}) or {}
+    # Also check the original headers dict
+    all_headers = kwargs.get("headers", {}) or {}
+    all_headers.update(headers)
+    
+    initiator = all_headers.get("X-Initiator", "NOT SET")
+    model = kwargs.get("model", "unknown")
+    
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] "
+          f"model={model} X-Initiator={initiator}")
+
+litellm.success_callback = [log_copilot_request]
+```
+
+## 3. Monkey-Patch `httpx` to Sniff All Outgoing Headers
+
+This is the nuclear option — intercepts every HTTP request LiteLLM sends to Copilot's backend:
+
+```python
+# Add this to litellm_copilot_patch.py or run separately after apply()
+
+import httpx
+from datetime import datetime
+
+_original_send = httpx.Client.send
+_original_async_send = httpx.AsyncClient.send
+
+def _sniff_send(self, request, **kwargs):
+    if "githubcopilot.com" in str(request.url):
+        initiator = request.headers.get("x-initiator", 
+                     request.headers.get("X-Initiator", "NOT SET"))
+        intent = request.headers.get("openai-intent", "NOT SET")
+        editor = request.headers.get("editor-version", "NOT SET")
+        method = request.method
+        path = request.url.path
+        
+        print(f"\033[36m[{datetime.now().strftime('%H:%M:%S')}] "
+              f"{method} {path}\033[0m")
+        print(f"  X-Initiator:    {initiator}")
+        print(f"  editor-version: {editor}")
+        print(f"  openai-intent:  {intent}")
+        
+        # Parse body to show model
+        try:
+            body = json.loads(request.content)
+            print(f"  model:          {body.get('model', 'N/A')}")
+            # Count message roles
+            msgs = body.get("messages", body.get("input", []))
+            if isinstance(msgs, list):
+                roles = [m.get("role", m.get("type", "?")) for m in msgs if isinstance(m, dict)]
+                print(f"  roles:          {roles}")
+        except:
+            pass
+        print()
+    
+    return _original_send(self, request, **kwargs)
+
+async def _sniff_async_send(self, request, **kwargs):
+    if "githubcopilot.com" in str(request.url):
+        initiator = request.headers.get("x-initiator",
+                     request.headers.get("X-Initiator", "NOT SET"))
+        editor = request.headers.get("editor-version", "NOT SET")
+        method = request.method
+        path = request.url.path
+        
+        print(f"\033[36m[{datetime.now().strftime('%H:%M:%S')}] "
+              f"{method} {path}\033[0m")
+        print(f"  X-Initiator:    {initiator}")
+        print(f"  editor-version: {editor}")
+        
+        try:
+            body = json.loads(request.content)
+            print(f"  model:          {body.get('model', 'N/A')}")
+        except:
+            pass
+        print()
+    
+    return await _original_async_send(self, request, **kwargs)
+
+import json
+httpx.Client.send = _sniff_send
+httpx.AsyncClient.send = _sniff_async_send
+
+print("[copilot-sniffer] Intercepting all requests to githubcopilot.com")
+```
+
+## 4. Quick Verification Script
+
+Run a simple two-turn test and count the initiator values:
+
+```python
+import litellm_copilot_patch
+litellm_copilot_patch.apply()
+
+# Enable the sniffer from option 3 above
+# ... (paste the httpx sniff code) ...
+
+import litellm
+
+# Turn 1: should be X-Initiator: user
+resp1 = litellm.completion(
+    model="github_copilot/gpt-4.1",
+    messages=[{"role": "user", "content": "Say hello"}],
+)
+
+# Turn 2: has assistant message → should be X-Initiator: agent
+resp2 = litellm.completion(
+    model="github_copilot/gpt-4.1",
+    messages=[
+        {"role": "user", "content": "Say hello"},
+        {"role": "assistant", "content": resp1.choices[0].message.content},
+        {"role": "user", "content": "Now say goodbye"},
+    ],
+)
+```
+
+Expected output:
+```
+[14:30:01] POST /chat/completions
+  X-Initiator:    user          ← ✅ first prompt
+  editor-version: vscode/1.107.0
+  model:          gpt-4.1
+  roles:          ['user']
+
+[14:30:03] POST /chat/completions
+  X-Initiator:    agent         ← ✅ follow-up (free)
+  editor-version: vscode/1.107.0
+  model:          gpt-4.1
+  roles:          ['user', 'assistant', 'user']
+```
+
+If the second call shows `X-Initiator: user`, the patch failed. If it shows `agent` but premium requests still get consumed (check with `copilot-api check-usage` or a quick `curl` to the usage API), then the issue is server-side and beyond what header patching can fix.
+
+## 5. Programmatic Usage Check
+
+Skip the web dashboard entirely — hit the usage API directly:
+
+```bash
+# Get your copilot token from litellm's cache
+TOKEN=$(cat ~/.config/litellm/github_copilot/api-key.json | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+
+# Check premium request balance
+curl -s -H "Authorization: token $(cat ~/.config/litellm/github_copilot/access-token)" \
+  https://api.github.com/copilot_internal/user | \
+  python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+q = d['quota_snapshots']['premium_interactions']
+print(f'Premium requests: {q[\"remaining\"]}/{q[\"entitlement\"]} remaining ({q[\"percent_remaining\"]:.1f}%)')
+print(f'Resets: {d[\"quota_reset_date\"]}')
+"
+```
+
+Run this before and after your test — if only 1 premium request was consumed for a multi-turn agentic session, you're good.
