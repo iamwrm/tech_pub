@@ -1,0 +1,4 @@
+
+## Pixi skills
+https://prefix.dev/blog/packaging-ai-ml-models-as-conda-packages
+
