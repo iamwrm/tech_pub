@@ -1,3 +1,24 @@
+Setup GitHub Copilot
+
+Pricing (Pro): $10/month, 300 premium requests
+
+Cost estimate:
+- 300 requests × $0.04 = $12
+- $10 = ~100 Opus 4.6 requests
+
+Opus 4.6 API: $5/1M input, $25/1M output
+- 50K in + 50K out = $0.25 + $1.25 = $1.50/req
+- 100 reqs = $150
+- If 500K in + 500K out = $1,500
+
+GPT-5.3-Codex API: $1.75/1M input, $14/1M output
+- 50K in + 50K out = $0.09 + $0.70 = $0.79/req
+- 100 reqs = $79
+- If 500K in + 500K out = $788
+
+
+
+
 https://docs.github.com/en/enterprise-cloud@latest/rest/copilot/copilot-usage-metrics?apiVersion=2022-11-28
 
 
