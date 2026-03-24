@@ -1,6 +1,9 @@
 /**
  * Token usage status for the most recently completed user prompt.
  *
+ * Example footer layout:
+ *   openai-codex/gpt-5.4 ↑73k R145k H67% W26k ↓398 $0.224
+ *
  * Primary live update source is `agent_end`, because it fires once per user
  * prompt and already contains the assistant messages produced for that prompt.
  *
@@ -174,14 +177,14 @@ function renderStatus(summary: LastTurnUsageSummary, ctx: ExtensionContext): str
 
 	if (summary.cacheHitPercent !== null) {
 		const percentColor = summary.cacheHitPercent >= 70 ? "success" : summary.cacheHitPercent >= 30 ? "warning" : "dim";
-		parts.push(theme.fg(percentColor, `${Math.round(summary.cacheHitPercent)}%`));
+		parts.push(`${theme.fg("dim", "H")}${theme.fg(percentColor, `${Math.round(summary.cacheHitPercent)}%`)}`);
 	}
-
-	parts.push(`${theme.fg("dim", "↓")}${theme.fg("muted", formatTokens(summary.output))}`);
 
 	if (summary.cacheWrite > 0) {
 		parts.push(`${theme.fg("dim", "W")}${theme.fg("muted", formatTokens(summary.cacheWrite))}`);
 	}
+
+	parts.push(`${theme.fg("dim", "↓")}${theme.fg("muted", formatTokens(summary.output))}`);
 
 	parts.push(`${theme.fg("dim", "$")}${theme.fg(summary.totalCost > 0 ? "muted" : "dim", formatCost(summary.totalCost))}`);
 
