@@ -1,3 +1,5 @@
+
+````
 Create a sequence diagram showing the interaction between [participants] in [system/protocol name]. 
 
 The diagram should:
@@ -12,3 +14,4 @@ The diagram should:
 The scenario to illustrate: [describe the specific workflow, e.g., "Two clients competing for a file lock, where Client A successfully acquires the lock first, then Client B attempts to acquire the same lock"]
 
 For each step, show the request and its corresponding response as a pair. Include any confirmation or acknowledgment messages that are part of the protocol.
+````
