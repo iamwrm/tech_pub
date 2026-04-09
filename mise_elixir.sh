@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Install mise
-curl -sSf https://mise.run | sh
-export PATH="$HOME/.local/bin:$PATH"
+# Install mise if not already installed
+if ! command -v mise &> /dev/null; then
+  curl -sSf https://mise.run | sh
+  export PATH="$HOME/.local/bin:$PATH"
+fi
 
 # Install Erlang and Elixir via mise
 mise use erlang@latest elixir@latest -y
