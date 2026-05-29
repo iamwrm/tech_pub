@@ -1,0 +1,241 @@
+$ cco
+ ▐▛███▜▌   Claude Code v2.1.156
+▝▜█████▛▘  Opus 4.8 with xhigh effort · Claude Max
+  ▘▘ ▝▝    /home/wr
+
+
+❯ /effort
+  ⎿  Set effort level to ultracode (this session only): xhigh + dynamic workflow orchestration
+
+❯ demo workflow capability, run one for example, use uv + python to do some calculation
+
+● I'll demo the Workflow tool with a real multi-agent computation. Let me first confirm the toolchain is available, then design a workflow where each agent independently estimates
+  π via a different numerical method using uv + Python — including high-precision ones via uv run --with mpmath — then verifies and ranks them.
+
+● Bash(which uv && uv --version && which python3 && python3 --version)
+  ⎿  /home/wr/.local/bin/uv
+     uv 0.7.12
+     /usr/bin/python3
+     Python 3.13.5
+
+● uv 0.7.12 + Python 3.13.5 confirmed. Now launching the workflow: a π-estimation derby. Six agents each estimate π by a different numerical method (running real Python through
+  uv, some pulling in mpmath via uv run --with mpmath to showcase uv's ephemeral dependency management), then each result is independently verified against the true digits, and a
+  final agent synthesizes a ranked report.
+
+● Workflow(export const meta = {
+            name: 'pi-estimation-derby',
+            description: 'Estimate π by 6 numerical methods using uv+Python, independently verify each, synthesize a ranked report',
+            phases: [
+              { title: 'Compute', detail: 'one agent per method runs real Python via uv (some via uv run --with mpmath)' },
+              { title: 'Verify', detail: 'independent agent re-checks each estimate against true π digits' },
+              { title: 'Synthesize', detail: 'rank methods by accuracy & convergence' },
+            ],
+          }
+
+          const PI_REF = '3.141592653589793238462643383279502884197169399375105820974944592307816406286'
+
+          const METHODS = [
+            {
+              key: 'monte-carlo',
+              name: 'Monte Carlo (random darts)',
+              uv: 'uv run python',
+              recipe: `Throw N=20_000_000 random points in the unit square, count how many land inside the quarter circle (x*x+y*y<=1), estimate pi = 4*inside/N. Use Python's
+          stdlib 'random' only. Seed with random.seed(12345) for reproducibility.`,
+            },
+            {
+              key: 'leibniz',
+              name: 'Leibniz series',
+              uv: 'uv run python',
+              recipe: `Sum the Leibniz series pi = 4 * sum_{k=0}^{K-1} (-1)^k/(2k+1) with K=5_000_000 terms. Pure stdlib float arithmetic.`,
+            },
+            {
+              key: 'nilakantha',
+              name: 'Nilakantha series',
+              uv: 'uv run python',
+              recipe: `Sum the Nilakantha series pi = 3 + sum_{k=1}^{K} (-1)^(k+1) * 4 / ((2k)(2k+1)(2k+2)) with K=2_000_000 terms. Pure stdlib float arithmetic.`,
+            },
+            {
+              key: 'machin',
+              name: "Machin's formula (high precision)",
+              uv: 'uv run --with mpmath python',
+              recipe: `Use mpmath with mp.dps=55. Compute pi via Machin's formula pi = 16*atan(1/5) - 4*atan(1/239) using mpmath.atan and mpmath.mpf. This MUST use 'uv run --with
+          mpmath python' so uv installs mpmath into an ephemeral env — that is the point of the demo.`,
+            },
+            {
+              key: 'gauss-legendre',
+              name: 'Gauss–Legendre (high precision)',
+              uv: 'uv run --with mpmath python',
+              recipe: `Use mpmath with mp.dps=55. Run the Gauss-Legendre algorithm for 8 iterations (quadratic convergence): a=1, b=1/sqrt(2), t=1/4, p=1; iterate a_next=(a+b)/2,
+          b=sqrt(a*b), t=t-p*(a-a_next)^2, a=a_next, p=2p; then pi=(a+b)^2/(4t). MUST use 'uv run --with mpmath python'.`,
+            },
+            {
+              key: 'bbp',
+              name: 'Bailey–Borwein–Plouffe (high precision)',
+              uv: 'uv run --with mpmath python',
+              recipe: `Use mpmath with mp.dps=55. Compute pi via the BBP formula pi = sum_{k=0}^{K} (1/16^k) * (4/(8k+1) - 2/(8k+4) - 1/(8k+5) - 1/(8k+6)) with K=60 terms, all in
+          mpmath.mpf precision. MUST use 'uv run --with mpmath python'.`,
+            },
+          ]
+
+          const COMPUTE_SCHEMA = {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              method: { type: 'string', description: 'method name' },
+              estimate: { type: 'string', description: 'the computed estimate of pi as a string, full precision printed' },
+              work_size: { type: 'string', description: 'samples or terms or iterations used' },
+              used_uv_with: { type: 'string', description: "the uv invocation actually run, e.g. 'uv run --with mpmath python script.py' or 'uv run python script.py'" },
+              digits_correct: { type: 'integer', description: 'number of correct leading significant digits vs true pi (count of matching digits including the leading 3 before
+          divergence)' },
+              elapsed_note: { type: 'string', description: 'rough wall-clock or relative speed observation' },
+              code: { type: 'string', description: 'the exact Python source you ran' },
+            },
+            required: ['method', 'estimate', 'used_uv_with', 'digits_correct', 'code'],
+          }
+
+          const VERIFY_SCHEMA = {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              method: { type: 'string' },
+              claimed_digits_correct: { type: 'integer' },
+              verified_digits_correct: { type: 'integer', description: 'digits you independently confirmed correct' },
+              matches: { type: 'boolean', description: 'true if the claimed estimate is plausible and digit count is within +/-1 of your independent check' },
+              comment: { type: 'string' },
+            },
+            required: ['method', 'verified_digits_correct', 'matches'],
+          }
+
+          phase('Compute')
+          log(`Launching ${METHODS.length} method agents — true π = ${PI_REF.slice(0, 20)}...`)
+
+          const results = await pipeline(
+            METHODS,
+            (m) => agent(
+              `You are estimating π using ONE numerical method, by running REAL Python code through uv. You have a Bash tool.\n\n` +
+              `METHOD: ${m.name}\nRECIPE: ${m.recipe}\n\n` +
+              `INVOCATION: run your script with: ${m.uv} <scriptfile>\n` +
+              `Write the script to a temp file (e.g. /tmp/pi_${m.key}.py), then run it with the exact uv command above. ` +
+              `Have the script print the estimate to as many digits as the method supports (for mpmath use mp.dps precision; for stdlib floats print with repr/full
+          precision).\n\n` +
+              `TRUE π for reference (compare against this): ${PI_REF}\n` +
+              `After running, count how many leading significant digits of your estimate match true π (count the '3' as digit 1; stop at the first mismatching digit).\n\n` +
+              `Return the method name, the printed estimate string, the work size, the EXACT uv command you ran, the correct-digit count, a speed note, and the full Python
+          source.`,
+              { label: `compute:${m.key}`, phase: 'Compute', schema: COMPUTE_SCHEMA }
+            ),
+            (computed, m) => agent(
+              `Independently VERIFY a π estimate. You have a Bash tool. Do NOT trust the claim — check it yourself.\n\n` +
+              `CLAIMED by method "${computed.method}": estimate = ${computed.estimate}, claimed correct digits = ${computed.digits_correct}.\n\n` +
+              `Get ground truth by running: uv run --with mpmath python -c "from mpmath import mp, mpf; mp.dps=60; print(mp.pi)"\n` +
+              `Compare the claimed estimate's leading digits to true π and count how many leading significant digits actually match (count the leading 3 as digit 1, stop at first
+          mismatch). ` +
+              `Set matches=true if the claimed digit count is within ±1 of what you independently measured AND the estimate is genuinely close to π.\n\n` +
+              `Return method="${m.key}", the claimed count, your independently verified count, the matches boolean, and a one-line comment.`,
+              { label: `verify:${m.key}`, phase: 'Verify', schema: VERIFY_SCHEMA }
+            ).then((v) => ({ ...computed, verification: v }))
+          )
+
+          const clean = results.filter(Boolean)
+          log(`${clean.length}/${METHODS.length} methods computed and verified`)
+
+          phase('Synthesize')
+          const report = await agent(
+            `Write a concise markdown report for a π-estimation derby demo. Here is the verified data as JSON:\n\n` +
+            JSON.stringify(clean.map((r) => ({
+              method: r.method,
+              estimate: r.estimate,
+              work_size: r.work_size,
+              uv_command: r.used_uv_with,
+              claimed_digits_correct: r.digits_correct,
+              verified_digits_correct: r.verification?.verified_digits_correct,
+              verifier_agrees: r.verification?.matches,
+              speed_note: r.elapsed_note,
+            })), null, 2) +
+            `\n\nProduce:\n` +
+            `1. A markdown TABLE ranked by VERIFIED correct digits (descending): columns = Rank | Method | Verified digits | Work size | uv command | Verifier agrees?\n` +
+            `2. A 2-3 sentence "Takeaways" section: which methods converge fastest (Gauss-Legendre's quadratic convergence vs the slow Leibniz series vs Monte Carlo's statistical
+          noise), and one line noting that the high-precision methods pulled mpmath in on-the-fly via 'uv run --with mpmath'.\n` +
+            `Keep it tight and skimmable. Output ONLY the markdown.`,
+            { label: 'synthesize', phase: 'Synthesize' }
+          )
+
+          return { methodCount: clean.length, report }
+          )
+  ⎿  ✔ Completed in 56s · 13 agents · 129.1k tokens
+
+● Workflow pi-estimation-derby is running in the background (Run ID wf_44eb03cd-614). Here's the shape of what it's doing:
+
+  Phase 1 — Compute (6 agents in parallel, each runs real Python via uv):
+
+  ┌───────────────────────────────────┬─────────────────────────────┐
+  │              Method               │          Toolchain          │
+  ├───────────────────────────────────┼─────────────────────────────┤
+  │ Monte Carlo (20M random darts)    │ uv run python (stdlib)      │
+  ├───────────────────────────────────┼─────────────────────────────┤
+  │ Leibniz series (5M terms)         │ uv run python (stdlib)      │
+  ├───────────────────────────────────┼─────────────────────────────┤
+  │ Nilakantha series (2M terms)      │ uv run python (stdlib)      │
+  ├───────────────────────────────────┼─────────────────────────────┤
+  │ Machin's formula                  │ uv run --with mpmath python │
+  ├───────────────────────────────────┼─────────────────────────────┤
+  │ Gauss–Legendre (8 iters)          │ uv run --with mpmath python │
+  ├───────────────────────────────────┼─────────────────────────────┤
+  │ Bailey–Borwein–Plouffe (60 terms) │ uv run --with mpmath python │
+  └───────────────────────────────────┴─────────────────────────────┘
+
+  Phase 2 — Verify: each estimate is independently re-checked by a separate agent that computes true π to 60 digits via mpmath and counts matching digits (it's prompted not to
+  trust the claim).
+
+  Phase 3 — Synthesize: one agent ranks all methods by verified correct digits and writes a report.
+
+  trust the claim).
+
+  Phase 3 — Synthesize: one agent ranks all methods by verified correct digits and writes a report.
+
+  It's a pipeline, so each method flows compute→verify on its own — Gauss–Legendre can be verifying while Leibniz is still grinding its 5M terms. You can watch live with
+  /workflows. I'll relay the ranked report as soon as it lands.
+
+✻ Waiting for 1 dynamic workflow to finish
+
+● Dynamic workflow "Estimate π by 6 numerical methods using uv+Python, independently verify each, synthesize a ranked report" completed · 56s
+
+● ✅ Workflow complete — 13 agents (6 compute + 6 verify + 1 synthesize), 34 tool calls, ~57s wall-clock. Every estimate was independently verified against true π. Here's the
+  ranked report:
+
+  ---
+
+  ┌──────┬──────────────────────────────────┬─────────────────┬────────────────────────────────────────┬─────────────────────────────┬──────────────────┐
+  │ Rank │              Method              │ Verified digits │               Work size                │         uv command          │ Verifier agrees? │
+  ├──────┼──────────────────────────────────┼─────────────────┼────────────────────────────────────────┼─────────────────────────────┼──────────────────┤
+  │ 🥇 1 │ Machin's formula (mpmath, 55 dp) │ 54              │ mp.dps = 55 (two arctan series)        │ uv run --with mpmath python │ ✅ Yes           │
+  ├──────┼──────────────────────────────────┼─────────────────┼────────────────────────────────────────┼─────────────────────────────┼──────────────────┤
+  │ 🥇 1 │ Gauss–Legendre (high precision)  │ 54              │ 8 iterations, mp.dps = 55              │ uv run --with mpmath python │ ✅ Yes           │
+  ├──────┼──────────────────────────────────┼─────────────────┼────────────────────────────────────────┼─────────────────────────────┼──────────────────┤
+  │ 🥇 1 │ Bailey–Borwein–Plouffe (mpmath)  │ 54              │ K=60 (61 terms), mp.dps = 55           │ uv run --with mpmath python │ ✅ Yes           │
+  ├──────┼──────────────────────────────────┼─────────────────┼────────────────────────────────────────┼─────────────────────────────┼──────────────────┤
+  │ 4    │ Nilakantha series                │ 14              │ 2,000,000 terms                        │ uv run python               │ ✅ Yes           │
+  ├──────┼──────────────────────────────────┼─────────────────┼────────────────────────────────────────┼─────────────────────────────┼──────────────────┤
+  │ 5    │ Leibniz series                   │ 7               │ 5,000,000 terms                        │ uv run python               │ ✅ Yes           │
+  ├──────┼──────────────────────────────────┼─────────────────┼────────────────────────────────────────┼─────────────────────────────┼──────────────────┤
+  │ 6    │ Monte Carlo (random darts)       │ 4               │ 20,000,000 samples (15,709,484 inside) │ uv run python               │ ✅ Yes           │
+  └──────┴──────────────────────────────────┴─────────────────┴────────────────────────────────────────┴─────────────────────────────┴──────────────────┘
+
+  Takeaways: The high-precision trio blows everyone away — Gauss–Legendre's quadratic convergence roughly doubles correct digits each iteration, hitting 54 digits in just 8 steps,
+  while Machin and BBP converge geometrically to the same precision near-instantly. The series methods crawl: Nilakantha tops out at ~14 digits (the float64 ceiling), Leibniz
+  buys only ~7 digits even after 5M terms, and Monte Carlo's 1/√N statistical noise leaves it stuck at 4 digits despite 20M samples. All three high-precision methods pulled mpmath
+  in on-the-fly via uv run --with mpmath — no manual install.
+
+  ---
+  What this demo showed about the Workflow tool
+
+  - Fan-out parallelism — 6 method agents ran concurrently, each executing real uv + Python (not simulated).
+  - Pipeline, not barrier — each method flowed compute → verify independently; fast methods (Gauss–Legendre) verified while Leibniz was still summing 5M terms.
+  - Structured output — agents were forced through JSON schemas (estimate, digits_correct, code…), so no fragile text parsing.
+  - Adversarial verification — a separate agent recomputed π to 60 digits and re-counted matching digits rather than trusting each claim (all 6 held up).
+  - uv's ephemeral envs — the 3 high-precision methods demonstrated uv run --with mpmath, conjuring a dependency per-run with zero project setup.
+
+  The full script is saved at …/workflows/scripts/pi-estimation-derby-wf_44eb03cd-614.js if you'd like to tweak and re-run it (e.g. add a 7th method or bump precision to 1000
+  digits).
+
+✻ Crunched for 2m 27s
