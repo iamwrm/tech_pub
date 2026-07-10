@@ -1,7 +1,7 @@
 
 
 ```
-Improve the following prompt, this is for instructing coding agent in claude code
+Improve the following prompt, this is for instructing coding agent in claude code.
 Only 1 paragraph. Minimal format.
 ```
 

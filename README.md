@@ -1,5 +1,3 @@
 
 
-https://github.com/iamwrm/gitea_fork
-
-
+[prompts.md](prompts.md)
