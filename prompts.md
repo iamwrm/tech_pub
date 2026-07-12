@@ -1,9 +1,19 @@
+## update upstream and plan updates
 
+```
+Pull the latest upstream source and changelog, compare them with the current repository baseline, and identify new features, breaking changes, deprecations, removed APIs,
+compatibility risks, and stale documentation or dependencies. Sweep the repository for affected code and references, then propose a concise update plan with files, rationale,
+validation steps, and deferred items. Do not modify files or run state-changing commands until I explicitly reply “go”; treat every other reply as feedback to revise the plan.
+```
+
+## Improve prompt
 
 ```
 Improve the following prompt, this is for instructing coding agent in claude code.
 Only 1 paragraph. Minimal format.
 ```
+
+## Dev plan
 
 ```
 Propose a plan (files affected, approach) before making any changes.
