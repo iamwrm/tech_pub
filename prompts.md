@@ -1,3 +1,10 @@
+## distilled pseudocode
+
+```
+Show me code snippets as distilled pseudocode, not verbatim repository code, for illustrative purpose.
+```
+
+
 ## IV-DC
 
 ```
