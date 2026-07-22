@@ -1,3 +1,9 @@
+## Reply in Chinese
+
+```
+Reply in Chinese while retaining key technical terms in English.
+```
+
 ## I have ADHD
 
 ```
