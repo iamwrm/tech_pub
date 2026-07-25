@@ -1,3 +1,10 @@
+## Show State Board
+
+```
+Show me your state board, including CLOSED, NOW, NEXT, TODO, BLOCKED, BACKLOG, MAINLINE
+```
+
+
 ## Reply in Chinese
 
 ```
