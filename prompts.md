@@ -1,3 +1,9 @@
+## Batch interaction
+
+```
+Only stop when you need my judgement, batch your questions, so we can save interaction times.
+```
+
 ## Git commit related
 
 ```
