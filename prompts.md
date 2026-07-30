@@ -1,3 +1,9 @@
+## distilled pseudocode
+
+```
+Explain to me in ascii art and code snippets as distilled pseudocode, not verbatim repository code, for illustrative purpose.
+```
+
 ## Summarize in Chinese
 
 ```
@@ -82,11 +88,7 @@ Remove filler openings, repeated conclusions, unnecessary side notes, vague next
 Make the answer or current state—and the next useful action, when one exists—immediately visible.
 ```
 
-## distilled pseudocode
 
-```
-Show me code snippets as distilled pseudocode, not verbatim repository code, for illustrative purpose.
-```
 
 
 ## IV-DC
