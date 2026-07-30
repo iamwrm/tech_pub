@@ -1,3 +1,10 @@
+## Summarize in Chinese
+
+```
+Summarize this article 
+Reply in Chinese while retaining key technical terms in English.
+```
+
 ## Bro
 
 ```
