@@ -3,13 +3,14 @@
  *
  * Stock pi only runs soft-threshold auto-compaction after `agent_end` (and
  * before the next prompt). Long tool loops can therefore overshoot the soft
- * window until hard overflow. This extension moves that threshold check to
- * `turn_end` when tool work is still pending, using the public
- * `ctx.compact()` path (abort active run → compact → rebuild context).
+ * window until hard overflow. This extension interrupts at `turn_end` when
+ * tool work is still pending: it aborts the active run, lets pi finish its
+ * normal post-run compaction check, then falls back to public `ctx.compact()`
+ * only if context usage is still over the soft threshold at `agent_settled`.
  *
- * Because `ctx.compact()` always aborts and there is no public
- * `agent.continue()`, resume is a synthetic user nudge via
- * `pi.sendUserMessage` so the same interaction can keep going after compact.
+ * There is no public in-run `agent.continue()`: both this flow and direct
+ * `ctx.compact()` end the active run. Resume is therefore a synthetic user
+ * nudge via `pi.sendUserMessage` so the same task can continue after compact.
  *
  * Enable with `/mid-turn-compact enable`. Default: disabled.
  *
@@ -69,9 +70,6 @@ import type {
 /** Default reserve tokens; matches pi CompactionSettings.reserveTokens. */
 export const DEFAULT_RESERVE_TOKENS = 16_384;
 
-/** Cap mid-turn compact+resume cycles per agent run to avoid thrash. */
-export const MAX_MID_TURN_COMPACTS_PER_RUN = 3;
-
 /** Synthetic resume prompt after mid-turn compact. Sent as a real user message. */
 export const MID_TURN_CONTINUE_PROMPT =
 	"[mid-turn-compact] Context was compacted mid-task. Continue the current task from the latest tool results without restarting the goal.";
@@ -91,7 +89,6 @@ export type MidTurnCompactStatus = {
 	enabled: boolean;
 	inFlight: boolean;
 	compactsThisRun: number;
-	maxPerRun: number;
 };
 
 /**
@@ -126,8 +123,6 @@ export function isOverSoftThreshold(
 export function shouldTriggerMidTurnCompact(options: {
 	enabled: boolean;
 	inFlight: boolean;
-	compactsThisRun: number;
-	maxPerRun: number;
 	toolResultCount: number;
 	tokens: number | null | undefined;
 	contextWindow: number | null | undefined;
@@ -135,7 +130,6 @@ export function shouldTriggerMidTurnCompact(options: {
 }): boolean {
 	if (!options.enabled) return false;
 	if (options.inFlight) return false;
-	if (options.compactsThisRun >= options.maxPerRun) return false;
 	if (options.toolResultCount <= 0) return false;
 	return isOverSoftThreshold(options.tokens, options.contextWindow, options.reserveTokens);
 }
@@ -166,7 +160,6 @@ export default function midTurnCompact(pi: ExtensionAPI): void {
 		enabled,
 		inFlight,
 		compactsThisRun,
-		maxPerRun: MAX_MID_TURN_COMPACTS_PER_RUN,
 	});
 
 	const formatStatus = (): string => {
@@ -174,7 +167,7 @@ export default function midTurnCompact(pi: ExtensionAPI): void {
 		return [
 			`mid-turn-compact: ${s.enabled ? "enabled" : "disabled"}`,
 			`in-flight: ${s.inFlight ? "yes" : "no"}`,
-			`compacts this run: ${s.compactsThisRun}/${s.maxPerRun}`,
+			`compacts this interaction: ${s.compactsThisRun}`,
 		].join("; ");
 	};
 
@@ -200,40 +193,48 @@ export default function midTurnCompact(pi: ExtensionAPI): void {
 		}
 	};
 
-	const triggerCompact = (ctx: ExtensionContext): void => {
+	const startMidTurnBoundary = (ctx: ExtensionContext): void => {
 		inFlight = true;
 		compactsThisRun += 1;
-		notify(
-			ctx,
-			`Mid-turn compact starting (${compactsThisRun}/${MAX_MID_TURN_COMPACTS_PER_RUN})…`,
-			"info",
-		);
-		// Public compact boundary only: timing ownership is here; wire shape and
-		// tool-call/result pairing under server compaction are 0017's (see file
-		// header). Do not replace this with a custom history rewrite that could
-		// leave open tool_results for calls sealed only inside an artifact.
+		notify(ctx, `Mid-turn compact boundary starting (#${compactsThisRun})…`, "info");
+		// Interrupt before the next model sample, but do not race pi's post-run
+		// auto-compaction with a delayed manual compact. agent_settled runs only
+		// after pi has completed its retry/compaction lifecycle.
+		ctx.abort();
+	};
+
+	const compactAfterSettlement = (ctx: ExtensionContext): void => {
+		// Consume this settlement before starting the fire-and-forget fallback.
+		// A compacted context reports tokens:null until its next assistant turn;
+		// that is evidence that pi already owned this forced boundary.
+		inFlight = false;
+		const usage = ctx.getContextUsage();
+		if (!isOverSoftThreshold(usage?.tokens, usage?.contextWindow)) {
+			resumeTask(ctx, "Mid-turn compact done; resuming task.");
+			return;
+		}
+
+		// Pi did not compact (most commonly because the new tool results, rather
+		// than the preceding assistant usage, crossed the threshold). Use its
+		// public manual boundary now that the agent is fully settled. Wire shape
+		// and call/result pairing under server compaction remain 0017's concern.
 		ctx.compact({
 			onComplete: () => {
-				// compact() aborts the active run first; always re-enter after success.
 				resumeTask(ctx, "Mid-turn compact done; resuming task.");
 			},
-			onError: (error) => {
-				// compact() aborts before prepareCompaction; failed attempts still need resume
-				// or a long tool loop dies on "session too small" / cancel.
-				notify(ctx, `Mid-turn compact failed: ${error.message}`, "error");
+			onError: () => {
+				// Pi already renders compaction_end failures. Resume without emitting a
+				// second copy of the same error.
 				resumeTask(ctx, "Mid-turn compact failed; resuming without compaction.");
 			},
 		});
 	};
 
-	// Do not reset the compact budget on agent_start: synthetic resume starts a
-	// new agent run and would otherwise allow infinite compact thrash.
+	// Keep an informational count across synthetic resumes; a real user prompt
+	// starts a new outer interaction and resets the display count.
 	pi.on("before_agent_start", (event) => {
 		const prompt = typeof event.prompt === "string" ? event.prompt : "";
-		if (prompt !== MID_TURN_CONTINUE_PROMPT) {
-			// Real user interaction: fresh budget for this outer interaction.
-			compactsThisRun = 0;
-		}
+		if (prompt !== MID_TURN_CONTINUE_PROMPT) compactsThisRun = 0;
 	});
 
 	pi.on("session_start", (event, ctx) => {
@@ -254,8 +255,6 @@ export default function midTurnCompact(pi: ExtensionAPI): void {
 			!shouldTriggerMidTurnCompact({
 				enabled,
 				inFlight,
-				compactsThisRun,
-				maxPerRun: MAX_MID_TURN_COMPACTS_PER_RUN,
 				toolResultCount,
 				tokens: usage?.tokens,
 				contextWindow: usage?.contextWindow,
@@ -263,7 +262,12 @@ export default function midTurnCompact(pi: ExtensionAPI): void {
 		) {
 			return;
 		}
-		triggerCompact(ctx);
+		startMidTurnBoundary(ctx);
+	});
+
+	pi.on("agent_settled", (_event, ctx) => {
+		if (!inFlight) return;
+		compactAfterSettlement(ctx);
 	});
 
 	pi.registerCommand(COMMAND_NAME, {
