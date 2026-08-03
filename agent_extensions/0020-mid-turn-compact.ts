@@ -12,10 +12,14 @@
  * `ctx.compact()` end the active run. Resume is therefore a synthetic user
  * nudge via `pi.sendUserMessage` so the same task can continue after compact.
  *
- * Enable with `/mid-turn-compact enable`. Default: disabled.
+ * Run `/mid-turn-compact` for interactive settings or enable directly with
+ * `/mid-turn-compact enable`. Default: disabled with a 100% window scale.
+ * `/mid-turn-compact 150` and `/mid-turn-compact 30%` change the effective
+ * context window used by this extension without mutating pi's model catalog.
  *
- * Soft threshold matches core pi:
- *   tokens > contextWindow - reserveTokens  (default reserve 16384)
+ * Soft threshold matches core pi after applying the extension-local scale:
+ *   tokens > (contextWindow * percentage / 100) - reserveTokens
+ *   (default reserve 16384)
  *
  * ---------------------------------------------------------------------------
  * IMPORTANT — tool-call / tool-result integrity with server compaction (0017)
@@ -60,15 +64,35 @@
  * does not — readable summaries replace cut history with text, not ciphertext.
  */
 
-import type {
-	ExtensionAPI,
-	ExtensionCommandContext,
-	ExtensionContext,
-	TurnEndEvent,
+import {
+	getSelectListTheme,
+	getSettingsListTheme,
+	type ExtensionAPI,
+	type ExtensionCommandContext,
+	type ExtensionContext,
+	type Theme,
+	type TurnEndEvent,
 } from "@earendil-works/pi-coding-agent";
+import {
+	type Component,
+	Container,
+	Input,
+	type SelectItem,
+	SelectList,
+	Spacer,
+	type SettingItem,
+	SettingsList,
+	Text,
+} from "@earendil-works/pi-tui";
 
 /** Default reserve tokens; matches pi CompactionSettings.reserveTokens. */
 export const DEFAULT_RESERVE_TOKENS = 16_384;
+
+/** Use the model-advertised context window unless the user explicitly scales it. */
+export const DEFAULT_CONTEXT_WINDOW_PERCENT = 100;
+
+/** Compact choices for the interactive settings row; direct arguments accept any positive finite percentage. */
+export const CONTEXT_WINDOW_PERCENT_PRESETS = [30, 50, 75, 100, 125, 150, 200] as const;
 
 /** Synthetic resume prompt after mid-turn compact. Sent as a real user message. */
 export const MID_TURN_CONTINUE_PROMPT =
@@ -89,6 +113,7 @@ export type MidTurnCompactStatus = {
 	enabled: boolean;
 	inFlight: boolean;
 	compactsThisRun: number;
+	contextWindowPercent: number;
 };
 
 /**
@@ -99,20 +124,250 @@ export function renderFooterStatus(enabled: boolean): string {
 	return enabled ? FOOTER_STATUS_ON : FOOTER_STATUS_OFF;
 }
 
+/** Parse a positive percentage with an optional trailing `%`. */
+export function parseContextWindowPercent(input: string): number | null {
+	const match = input.trim().match(/^(?:\d+(?:\.\d+)?|\.\d+)\s*%?$/);
+	if (!match) return null;
+	const value = Number.parseFloat(match[0]);
+	return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+/** Format a percentage without adding insignificant decimal zeroes. */
+export function formatContextWindowPercent(percent: number): string {
+	return `${String(percent)}%`;
+}
+
+/** Scale the model-advertised window for this extension's threshold only. */
+export function getEffectiveContextWindow(
+	contextWindow: number | null | undefined,
+	contextWindowPercent: number = DEFAULT_CONTEXT_WINDOW_PERCENT,
+): number | null {
+	if (contextWindow === null || contextWindow === undefined || !Number.isFinite(contextWindow) || contextWindow <= 0) {
+		return null;
+	}
+	if (!Number.isFinite(contextWindowPercent) || contextWindowPercent <= 0) return null;
+	const effectiveContextWindow = (contextWindow * contextWindowPercent) / 100;
+	return Number.isFinite(effectiveContextWindow) && effectiveContextWindow > 0 ? effectiveContextWindow : null;
+}
+
+export type ContextWindowMetrics = {
+	effectiveContextWindow: number;
+	softThreshold: number;
+};
+
+/** Resolve the scaled window and fixed-reserve threshold shown by the settings UI. */
+export function getContextWindowMetrics(
+	contextWindow: number | null | undefined,
+	contextWindowPercent: number,
+	reserveTokens: number = DEFAULT_RESERVE_TOKENS,
+): ContextWindowMetrics | null {
+	const effectiveContextWindow = getEffectiveContextWindow(contextWindow, contextWindowPercent);
+	if (effectiveContextWindow === null) return null;
+	return {
+		effectiveContextWindow,
+		softThreshold: effectiveContextWindow - reserveTokens,
+	};
+}
+
+/** Compact token formatting for settings labels (for example 81.6k or 1.2m). */
+export function formatCompactTokenCount(tokens: number): string {
+	if (!Number.isFinite(tokens)) return "?";
+	const formatScaled = (value: number, suffix: string): string => {
+		const rounded = Math.round(value * 10) / 10;
+		return `${Number.isInteger(rounded) ? rounded.toFixed(0) : rounded.toFixed(1)}${suffix}`;
+	};
+	const absolute = Math.abs(tokens);
+	if (absolute >= 1_000_000) return formatScaled(tokens / 1_000_000, "m");
+	if (absolute >= 1_000) return formatScaled(tokens / 1_000, "k");
+	return String(Math.round(tokens));
+}
+
+/** Value shown on the top-level settings row. */
+export function formatContextWindowSettingValue(
+	contextWindowPercent: number,
+	contextWindow: number | null | undefined,
+): string {
+	const percent = formatContextWindowPercent(contextWindowPercent);
+	const metrics = getContextWindowMetrics(contextWindow, contextWindowPercent);
+	return metrics === null ? percent : `${percent} · ${formatCompactTokenCount(metrics.effectiveContextWindow)} effective`;
+}
+
+function formatContextWindowChoiceDescription(
+	contextWindow: number | null | undefined,
+	contextWindowPercent: number,
+): string {
+	const parts: string[] = [];
+	const metrics = getContextWindowMetrics(contextWindow, contextWindowPercent);
+	if (metrics === null) {
+		parts.push("of model metadata");
+	} else {
+		parts.push(`${formatCompactTokenCount(metrics.effectiveContextWindow)} effective`);
+		parts.push(
+			metrics.softThreshold <= 0
+				? "compact immediately (reserve exceeds window)"
+				: `compact above ${formatCompactTokenCount(metrics.softThreshold)}`,
+		);
+	}
+	if (contextWindowPercent === DEFAULT_CONTEXT_WINDOW_PERCENT) parts.push("model default");
+	if (contextWindowPercent > 100) parts.push("⚠ provider may overflow first");
+	return parts.join(" · ");
+}
+
+type ContextWindowPercentSubmenuOptions = {
+	currentPercent: number;
+	contextWindow: number | null | undefined;
+	theme: Theme;
+	onDone: (percent?: number) => void;
+};
+
+/** SelectList presets plus an Input-backed custom percentage screen. */
+class ContextWindowPercentSubmenu extends Container {
+	private activeInput: Component | undefined;
+	private customInput: Input | undefined;
+	private customStatus: Text | undefined;
+	private mode: "picker" | "custom" = "picker";
+
+	constructor(private readonly options: ContextWindowPercentSubmenuOptions) {
+		super();
+		this.showPicker();
+	}
+
+	handleInput(data: string): void {
+		this.activeInput?.handleInput?.(data);
+		if (this.mode === "custom") this.refreshCustomStatus();
+	}
+
+	private setContent(content: Component, input: Component): void {
+		this.clear();
+		this.addChild(content);
+		this.activeInput = input;
+	}
+
+	private showPicker(): void {
+		this.mode = "picker";
+		this.customInput = undefined;
+		this.customStatus = undefined;
+
+		const content = new Container();
+		content.addChild(new Text(this.options.theme.fg("accent", this.options.theme.bold("Context window")), 0, 0));
+		content.addChild(new Spacer(1));
+		content.addChild(
+			new Text(
+				this.options.theme.fg(
+					"muted",
+					"Select an effective window scale. This changes only the mid-turn threshold; 100% uses model metadata.",
+				),
+				0,
+				0,
+			),
+		);
+		content.addChild(new Spacer(1));
+
+		const percentages = [...new Set([...CONTEXT_WINDOW_PERCENT_PRESETS, this.options.currentPercent])].sort(
+			(a, b) => a - b,
+		);
+		const items: SelectItem[] = percentages.map((percent) => ({
+			value: String(percent),
+			label: formatContextWindowPercent(percent),
+			description: formatContextWindowChoiceDescription(this.options.contextWindow, percent),
+		}));
+		items.push({
+			value: "custom",
+			label: "Custom…",
+			description: "Enter any positive percentage",
+		});
+
+		const selectList = new SelectList(items, Math.min(items.length, 10), getSelectListTheme(), {
+			minPrimaryColumnWidth: 12,
+			maxPrimaryColumnWidth: 18,
+		});
+		selectList.setSelectedIndex(items.findIndex((item) => item.value === String(this.options.currentPercent)));
+		selectList.onSelect = (item) => {
+			if (item.value === "custom") {
+				this.showCustomInput();
+				return;
+			}
+			const percent = parseContextWindowPercent(item.value);
+			if (percent !== null) this.options.onDone(percent);
+		};
+		selectList.onCancel = () => this.options.onDone();
+		content.addChild(selectList);
+		content.addChild(new Spacer(1));
+		content.addChild(new Text(this.options.theme.fg("dim", "  Enter to select · Esc to go back"), 0, 0));
+		this.setContent(content, selectList);
+	}
+
+	private showCustomInput(): void {
+		this.mode = "custom";
+		const content = new Container();
+		content.addChild(
+			new Text(this.options.theme.fg("accent", this.options.theme.bold("Custom context-window percentage")), 0, 0),
+		);
+		content.addChild(new Spacer(1));
+		content.addChild(
+			new Text(this.options.theme.fg("muted", 'Enter a positive percentage; the trailing "%" is optional.'), 0, 0),
+		);
+		content.addChild(new Spacer(1));
+
+		const input = new Input();
+		// Inserting through the public input path leaves the cursor at the end.
+		input.handleInput(formatContextWindowPercent(this.options.currentPercent));
+		input.onSubmit = (value) => {
+			const percent = parseContextWindowPercent(value);
+			if (percent !== null) this.options.onDone(percent);
+		};
+		input.onEscape = () => this.showPicker();
+		content.addChild(input);
+		content.addChild(new Spacer(1));
+
+		this.customStatus = new Text("", 0, 0);
+		content.addChild(this.customStatus);
+		content.addChild(new Spacer(1));
+		content.addChild(new Text(this.options.theme.fg("dim", "  Enter to apply · Esc to return to presets"), 0, 0));
+		this.customInput = input;
+		this.setContent(content, input);
+		this.refreshCustomStatus();
+	}
+
+	private refreshCustomStatus(): void {
+		if (!this.customInput || !this.customStatus) return;
+		const percent = parseContextWindowPercent(this.customInput.getValue());
+		if (percent === null) {
+			this.customStatus.setText(this.options.theme.fg("warning", "Enter a positive number, optionally followed by %."));
+			return;
+		}
+
+		const metrics = getContextWindowMetrics(this.options.contextWindow, percent);
+		const lines =
+			metrics === null
+				? [`Effective window: ${formatContextWindowPercent(percent)} of active model metadata`]
+				: [
+						`Effective window: ${formatCompactTokenCount(metrics.effectiveContextWindow)}`,
+						metrics.softThreshold <= 0
+							? "Mid-turn threshold: immediate (reserve exceeds window)"
+							: `Mid-turn threshold: ${formatCompactTokenCount(metrics.softThreshold)}`,
+					];
+		if (percent > 100) {
+			lines.push(this.options.theme.fg("warning", "⚠ Above the advertised model window; the provider may overflow first."));
+		}
+		this.customStatus.setText(lines.join("\n"));
+	}
+}
+
 /**
- * Soft-threshold check matching pi `shouldCompact`.
- * Exported for unit tests.
+ * Soft-threshold check matching pi `shouldCompact`, with an optional
+ * extension-local context-window scale. Exported for unit tests.
  */
 export function isOverSoftThreshold(
 	tokens: number | null | undefined,
 	contextWindow: number | null | undefined,
 	reserveTokens: number = DEFAULT_RESERVE_TOKENS,
+	contextWindowPercent: number = DEFAULT_CONTEXT_WINDOW_PERCENT,
 ): boolean {
 	if (tokens === null || tokens === undefined || !Number.isFinite(tokens)) return false;
-	if (contextWindow === null || contextWindow === undefined || !Number.isFinite(contextWindow) || contextWindow <= 0) {
-		return false;
-	}
-	return tokens > contextWindow - reserveTokens;
+	const effectiveContextWindow = getEffectiveContextWindow(contextWindow, contextWindowPercent);
+	if (effectiveContextWindow === null) return false;
+	return tokens > effectiveContextWindow - reserveTokens;
 }
 
 /**
@@ -127,19 +382,35 @@ export function shouldTriggerMidTurnCompact(options: {
 	tokens: number | null | undefined;
 	contextWindow: number | null | undefined;
 	reserveTokens?: number;
+	contextWindowPercent?: number;
 }): boolean {
 	if (!options.enabled) return false;
 	if (options.inFlight) return false;
 	if (options.toolResultCount <= 0) return false;
-	return isOverSoftThreshold(options.tokens, options.contextWindow, options.reserveTokens);
+	return isOverSoftThreshold(
+		options.tokens,
+		options.contextWindow,
+		options.reserveTokens,
+		options.contextWindowPercent,
+	);
 }
 
-function parseCommandArgs(args: string): "enable" | "disable" | "status" | "help" {
-	const first = args.trim().split(/\s+/)[0]?.toLowerCase() ?? "";
-	if (first === "enable" || first === "on" || first === "1" || first === "true") return "enable";
-	if (first === "disable" || first === "off" || first === "0" || first === "false") return "disable";
-	if (first === "status" || first === "") return "status";
-	return "help";
+type CommandAction =
+	| { kind: "settings" }
+	| { kind: "enable" }
+	| { kind: "disable" }
+	| { kind: "status" }
+	| { kind: "set-percent"; percent: number }
+	| { kind: "help" };
+
+function parseCommandArgs(args: string): CommandAction {
+	const value = args.trim().toLowerCase();
+	if (value === "") return { kind: "settings" };
+	if (value === "enable" || value === "on" || value === "1" || value === "true") return { kind: "enable" };
+	if (value === "disable" || value === "off" || value === "0" || value === "false") return { kind: "disable" };
+	if (value === "status") return { kind: "status" };
+	const percent = parseContextWindowPercent(value);
+	return percent === null ? { kind: "help" } : { kind: "set-percent", percent };
 }
 
 function notify(ctx: ExtensionContext | ExtensionCommandContext, message: string, level: "info" | "warning" | "error" = "info"): void {
@@ -150,9 +421,12 @@ export default function midTurnCompact(pi: ExtensionAPI): void {
 	let enabled = false;
 	let inFlight = false;
 	let compactsThisRun = 0;
+	let contextWindowPercent = DEFAULT_CONTEXT_WINDOW_PERCENT;
+	let boundaryContextWindowPercent: number | undefined;
 
 	const resetRunCounters = (): void => {
 		inFlight = false;
+		boundaryContextWindowPercent = undefined;
 		compactsThisRun = 0;
 	};
 
@@ -160,12 +434,20 @@ export default function midTurnCompact(pi: ExtensionAPI): void {
 		enabled,
 		inFlight,
 		compactsThisRun,
+		contextWindowPercent,
 	});
 
-	const formatStatus = (): string => {
+	const formatStatus = (ctx: ExtensionContext | ExtensionCommandContext): string => {
 		const s = status();
+		const advertisedContextWindow = ctx.getContextUsage()?.contextWindow ?? ctx.model?.contextWindow;
+		const effectiveContextWindow = getEffectiveContextWindow(advertisedContextWindow, s.contextWindowPercent);
+		const windowStatus =
+			effectiveContextWindow === null || advertisedContextWindow === null || advertisedContextWindow === undefined
+				? formatContextWindowPercent(s.contextWindowPercent)
+				: `${formatContextWindowPercent(s.contextWindowPercent)} (${Math.round(effectiveContextWindow)} effective from ${Math.round(advertisedContextWindow)})`;
 		return [
 			`mid-turn-compact: ${s.enabled ? "enabled" : "disabled"}`,
+			`context window: ${windowStatus}`,
 			`in-flight: ${s.inFlight ? "yes" : "no"}`,
 			`compacts this interaction: ${s.compactsThisRun}`,
 		].join("; ");
@@ -181,6 +463,108 @@ export default function midTurnCompact(pi: ExtensionAPI): void {
 		ctx.ui.setStatus(FOOTER_STATUS_KEY, undefined);
 	};
 
+	const setEnabled = (
+		nextEnabled: boolean,
+		ctx: ExtensionContext | ExtensionCommandContext,
+		announce: boolean,
+	): void => {
+		enabled = nextEnabled;
+		if (!enabled) {
+			inFlight = false;
+			boundaryContextWindowPercent = undefined;
+		}
+		pushFooterStatus(ctx);
+		if (!announce) return;
+		notify(
+			ctx,
+			enabled
+				? "Mid-turn compact enabled. Soft threshold fires at turn_end when tools are pending."
+				: "Mid-turn compact disabled.",
+			"info",
+		);
+	};
+
+	const setContextWindowPercent = (
+		percent: number,
+		ctx: ExtensionContext | ExtensionCommandContext,
+		announce: boolean,
+	): void => {
+		contextWindowPercent = percent;
+		if (!announce) return;
+		let message = `Mid-turn compact context-window scale set to ${formatContextWindowPercent(percent)}.`;
+		if (!enabled) message += " Mid-turn compact remains disabled.";
+		if (percent > 100) message += " This does not change the provider limit and may overflow before the boundary.";
+		notify(ctx, message, percent > 100 ? "warning" : "info");
+	};
+
+	const openSettings = async (ctx: ExtensionCommandContext): Promise<void> => {
+		if (ctx.mode !== "tui") {
+			pushFooterStatus(ctx);
+			notify(
+				ctx,
+				`${formatStatus(ctx)}. Interactive settings require TUI mode; use enable, disable, status, or a percentage argument.`,
+				"info",
+			);
+			return;
+		}
+
+		await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+			const advertisedContextWindow = ctx.getContextUsage()?.contextWindow ?? ctx.model?.contextWindow;
+			const items: SettingItem[] = [
+				{
+					id: "enabled",
+					label: "Enabled",
+					description: "Interrupt over-threshold tool loops, compact after settlement, and resume the task.",
+					currentValue: enabled ? "on" : "off",
+					values: ["off", "on"],
+				},
+				{
+					id: "context-window-percent",
+					label: "Context window",
+					description:
+						"Press Enter to choose a preset or type a custom percentage. Scaling is extension-local; values above 100% may hit the provider limit first.",
+					currentValue: formatContextWindowSettingValue(contextWindowPercent, advertisedContextWindow),
+					submenu: (_currentValue, submenuDone) =>
+						new ContextWindowPercentSubmenu({
+							currentPercent: contextWindowPercent,
+							contextWindow: advertisedContextWindow,
+							theme,
+							onDone: (percent) => {
+								if (percent === undefined) {
+									submenuDone();
+									return;
+								}
+								setContextWindowPercent(percent, ctx, false);
+								submenuDone(formatContextWindowSettingValue(percent, advertisedContextWindow));
+							},
+						}),
+				},
+			];
+
+			const container = new Container();
+			container.addChild(new Text(theme.fg("accent", theme.bold("Mid-turn compact settings")), 1, 1));
+			const settingsList = new SettingsList(
+				items,
+				Math.min(items.length + 2, 10),
+				getSettingsListTheme(),
+				(id, newValue) => {
+					if (id === "enabled") setEnabled(newValue === "on", ctx, false);
+				},
+				() => done(undefined),
+			);
+			container.addChild(settingsList);
+
+			return {
+				render: (width) => container.render(width),
+				invalidate: () => container.invalidate(),
+				handleInput: (data) => {
+					settingsList.handleInput(data);
+					tui.requestRender();
+				},
+			};
+		});
+	};
+
 	const resumeTask = (ctx: ExtensionContext, note: string): void => {
 		try {
 			pi.sendUserMessage(MID_TURN_CONTINUE_PROMPT);
@@ -190,11 +574,13 @@ export default function midTurnCompact(pi: ExtensionAPI): void {
 			notify(ctx, `Mid-turn compact resume failed: ${message}`, "error");
 		} finally {
 			inFlight = false;
+			boundaryContextWindowPercent = undefined;
 		}
 	};
 
 	const startMidTurnBoundary = (ctx: ExtensionContext): void => {
 		inFlight = true;
+		boundaryContextWindowPercent = contextWindowPercent;
 		compactsThisRun += 1;
 		notify(ctx, `Mid-turn compact boundary starting (#${compactsThisRun})…`, "info");
 		// Interrupt before the next model sample, but do not race pi's post-run
@@ -206,10 +592,13 @@ export default function midTurnCompact(pi: ExtensionAPI): void {
 	const compactAfterSettlement = (ctx: ExtensionContext): void => {
 		// Consume this settlement before starting the fire-and-forget fallback.
 		// A compacted context reports tokens:null until its next assistant turn;
-		// that is evidence that pi already owned this forced boundary.
+		// that is evidence that pi already owned this forced boundary. Use the
+		// same scale that admitted the boundary even if settings changed meanwhile.
+		const settledContextWindowPercent = boundaryContextWindowPercent ?? contextWindowPercent;
 		inFlight = false;
+		boundaryContextWindowPercent = undefined;
 		const usage = ctx.getContextUsage();
-		if (!isOverSoftThreshold(usage?.tokens, usage?.contextWindow)) {
+		if (!isOverSoftThreshold(usage?.tokens, usage?.contextWindow, DEFAULT_RESERVE_TOKENS, settledContextWindowPercent)) {
 			resumeTask(ctx, "Mid-turn compact done; resuming task.");
 			return;
 		}
@@ -258,6 +647,7 @@ export default function midTurnCompact(pi: ExtensionAPI): void {
 				toolResultCount,
 				tokens: usage?.tokens,
 				contextWindow: usage?.contextWindow,
+				contextWindowPercent,
 			})
 		) {
 			return;
@@ -271,29 +661,30 @@ export default function midTurnCompact(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand(COMMAND_NAME, {
-		description: "Enable/disable mid-turn soft-threshold compaction (enable|disable|status)",
+		description: "Configure mid-turn soft-threshold compaction (no args for settings; enable|disable|status|PERCENT)",
 		handler: async (args, ctx) => {
 			const action = parseCommandArgs(args);
-			switch (action) {
+			switch (action.kind) {
+				case "settings":
+					await openSettings(ctx);
+					return;
 				case "enable":
-					enabled = true;
-					pushFooterStatus(ctx);
-					notify(ctx, "Mid-turn compact enabled. Soft threshold fires at turn_end when tools are pending.", "info");
+					setEnabled(true, ctx, true);
 					return;
 				case "disable":
-					enabled = false;
-					inFlight = false;
-					pushFooterStatus(ctx);
-					notify(ctx, "Mid-turn compact disabled.", "info");
+					setEnabled(false, ctx, true);
+					return;
+				case "set-percent":
+					setContextWindowPercent(action.percent, ctx, true);
 					return;
 				case "status":
 					pushFooterStatus(ctx);
-					notify(ctx, formatStatus(), "info");
+					notify(ctx, formatStatus(ctx), "info");
 					return;
 				default:
 					notify(
 						ctx,
-						"Usage: /mid-turn-compact enable|disable|status",
+						"Usage: /mid-turn-compact [enable|disable|status|PERCENT] (no args opens settings)",
 						"warning",
 					);
 			}
