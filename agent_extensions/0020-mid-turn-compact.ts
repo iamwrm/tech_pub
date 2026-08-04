@@ -13,7 +13,8 @@
  * nudge via `pi.sendUserMessage` so the same task can continue after compact.
  *
  * Run `/mid-turn-compact` for interactive settings or enable directly with
- * `/mid-turn-compact enable`. Default: disabled with a 100% window scale.
+ * `/mid-turn-compact enable`. Default: disabled with a 100% window scale when
+ * no preference is saved. Enablement is durable in Pi's global settings;
  * `/mid-turn-compact 150` and `/mid-turn-compact 30%` change the effective
  * context window used by this extension without mutating pi's model catalog.
  *
@@ -64,7 +65,12 @@
  * does not — readable summaries replace cut history with text, not ciphertext.
  */
 
+import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
+
 import {
+	getAgentDir,
 	getSelectListTheme,
 	getSettingsListTheme,
 	type ExtensionAPI,
@@ -109,6 +115,12 @@ export const FOOTER_STATUS_ON = "midturn-compact: on";
 /** Footer chip when mid-turn compact is disabled. */
 export const FOOTER_STATUS_OFF = "midturn-compact: off";
 
+/** Namespace used for extension-owned values in Pi's global settings.json. */
+export const PI_SETTINGS_NAMESPACE = "renPublicPackage";
+
+/** Settings key for the durable mid-turn compact preference. */
+export const MID_TURN_COMPACT_SETTINGS_KEY = "midTurnCompact";
+
 export type MidTurnCompactStatus = {
 	enabled: boolean;
 	inFlight: boolean;
@@ -116,12 +128,101 @@ export type MidTurnCompactStatus = {
 	contextWindowPercent: number;
 };
 
+type JsonObject = Record<string, unknown>;
+
+function isJsonObject(value: unknown): value is JsonObject {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isFileNotFound(error: unknown): boolean {
+	return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}
+
+/** Resolve Pi's global settings file, honoring PI_CODING_AGENT_DIR. */
+export function getMidTurnCompactSettingsPath(): string {
+	return join(getAgentDir(), "settings.json");
+}
+
+function readSettingsObject(settingsPath: string): JsonObject {
+	try {
+		const parsed: unknown = JSON.parse(readFileSync(settingsPath, "utf8"));
+		if (!isJsonObject(parsed)) throw new Error("Pi settings must contain a JSON object");
+		return parsed;
+	} catch (error) {
+		if (isFileNotFound(error)) return {};
+		throw error;
+	}
+}
+
+/** Read the persisted preference; a missing or malformed preference defaults off. */
+export function readPersistedMidTurnCompactEnabled(settingsPath: string = getMidTurnCompactSettingsPath()): boolean {
+	try {
+		const settings = readSettingsObject(settingsPath);
+		const namespace = settings[PI_SETTINGS_NAMESPACE];
+		if (!isJsonObject(namespace)) return false;
+		const feature = namespace[MID_TURN_COMPACT_SETTINGS_KEY];
+		if (!isJsonObject(feature)) return false;
+		return feature.enabled === true;
+	} catch {
+		return false;
+	}
+}
+
 /**
- * Footer chip text beside session stats.
+ * Persist only the extension-owned preference while preserving all other Pi
+ * settings. The temp-file replacement prevents a partially-written settings
+ * file if the process is interrupted during the write.
+ */
+export function persistMidTurnCompactEnabled(
+	enabled: boolean,
+	settingsPath: string = getMidTurnCompactSettingsPath(),
+): void {
+	const settings = readSettingsObject(settingsPath);
+	const currentNamespace = isJsonObject(settings[PI_SETTINGS_NAMESPACE]) ? settings[PI_SETTINGS_NAMESPACE] : {};
+	const currentFeature = isJsonObject(currentNamespace[MID_TURN_COMPACT_SETTINGS_KEY])
+		? currentNamespace[MID_TURN_COMPACT_SETTINGS_KEY]
+		: {};
+	settings[PI_SETTINGS_NAMESPACE] = {
+		...currentNamespace,
+		[MID_TURN_COMPACT_SETTINGS_KEY]: {
+			...currentFeature,
+			enabled,
+		},
+	};
+
+	const directory = dirname(settingsPath);
+	mkdirSync(directory, { recursive: true });
+	const temporaryPath = join(directory, `.${basename(settingsPath)}.${process.pid}.${randomUUID()}.tmp`);
+	let mode: number | undefined;
+	if (existsSync(settingsPath)) mode = statSync(settingsPath).mode & 0o777;
+	try {
+		writeFileSync(temporaryPath, `${JSON.stringify(settings, null, 2)}\n`, {
+			encoding: "utf8",
+			...(mode === undefined ? {} : { mode }),
+		});
+		renameSync(temporaryPath, settingsPath);
+	} finally {
+		try {
+			unlinkSync(temporaryPath);
+		} catch (error) {
+			if (!isFileNotFound(error)) throw error;
+		}
+	}
+}
+
+/**
+ * Footer chip text beside session stats. Enabled non-default window scales
+ * replace "on" so the active override stays visible.
  * Exported for unit tests.
  */
-export function renderFooterStatus(enabled: boolean): string {
-	return enabled ? FOOTER_STATUS_ON : FOOTER_STATUS_OFF;
+export function renderFooterStatus(
+	enabled: boolean,
+	contextWindowPercent: number = DEFAULT_CONTEXT_WINDOW_PERCENT,
+): string {
+	if (!enabled) return FOOTER_STATUS_OFF;
+	return contextWindowPercent === DEFAULT_CONTEXT_WINDOW_PERCENT
+		? FOOTER_STATUS_ON
+		: `midturn-compact: ${formatContextWindowPercent(contextWindowPercent)}`;
 }
 
 /** Parse a positive percentage with an optional trailing `%`. */
@@ -418,7 +519,7 @@ function notify(ctx: ExtensionContext | ExtensionCommandContext, message: string
 }
 
 export default function midTurnCompact(pi: ExtensionAPI): void {
-	let enabled = false;
+	let enabled = readPersistedMidTurnCompactEnabled();
 	let inFlight = false;
 	let compactsThisRun = 0;
 	let contextWindowPercent = DEFAULT_CONTEXT_WINDOW_PERCENT;
@@ -455,7 +556,7 @@ export default function midTurnCompact(pi: ExtensionAPI): void {
 
 	const pushFooterStatus = (ctx: ExtensionContext | ExtensionCommandContext): void => {
 		if (!ctx.hasUI) return;
-		ctx.ui.setStatus(FOOTER_STATUS_KEY, renderFooterStatus(enabled));
+		ctx.ui.setStatus(FOOTER_STATUS_KEY, renderFooterStatus(enabled, contextWindowPercent));
 	};
 
 	const clearFooterStatus = (ctx: ExtensionContext | ExtensionCommandContext): void => {
@@ -474,6 +575,14 @@ export default function midTurnCompact(pi: ExtensionAPI): void {
 			boundaryContextWindowPercent = undefined;
 		}
 		pushFooterStatus(ctx);
+
+		try {
+			persistMidTurnCompactEnabled(enabled);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			notify(ctx, `Mid-turn compact changed for this session, but Pi config could not be saved: ${message}`, "error");
+		}
+
 		if (!announce) return;
 		notify(
 			ctx,
@@ -490,6 +599,7 @@ export default function midTurnCompact(pi: ExtensionAPI): void {
 		announce: boolean,
 	): void => {
 		contextWindowPercent = percent;
+		pushFooterStatus(ctx);
 		if (!announce) return;
 		let message = `Mid-turn compact context-window scale set to ${formatContextWindowPercent(percent)}.`;
 		if (!enabled) message += " Mid-turn compact remains disabled.";
