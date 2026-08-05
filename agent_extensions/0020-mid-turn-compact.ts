@@ -63,6 +63,9 @@
  * If compact is implemented without 0017 (readable local summarizer), the
  * same turn_end timing applies, but the server-artifact pairing story above
  * does not — readable summaries replace cut history with text, not ciphertext.
+ * 0017 is an optional backend enhancement; 0020 imports no sibling extension
+ * and remains directly activatable against Pi's public compact API. 0021 is
+ * orthogonal reasoning-replay policy and is not required by this extension.
  */
 
 import { randomUUID } from "node:crypto";
@@ -128,6 +131,7 @@ export type MidTurnCompactStatus = {
 	contextWindowPercent: number;
 };
 
+type ContinuationLease = symbol;
 type JsonObject = Record<string, unknown>;
 
 function isJsonObject(value: unknown): value is JsonObject {
@@ -514,8 +518,40 @@ function parseCommandArgs(args: string): CommandAction {
 	return percent === null ? { kind: "help" } : { kind: "set-percent", percent };
 }
 
+export const STALE_EXTENSION_CONTEXT_ERROR_PREFIX =
+	"This extension ctx is stale after session replacement or reload.";
+
+export function isStaleExtensionContextError(error: unknown): boolean {
+	return error instanceof Error && error.message.startsWith(STALE_EXTENSION_CONTEXT_ERROR_PREFIX);
+}
+
 function notify(ctx: ExtensionContext | ExtensionCommandContext, message: string, level: "info" | "warning" | "error" = "info"): void {
 	if (ctx.hasUI) ctx.ui.notify(message, level);
+}
+
+function isExtensionContextActive(ctx: ExtensionContext): boolean {
+	try {
+		// Ownership is checked separately through the continuation lease. This
+		// probe covers the remaining liveness race where Pi invalidates every
+		// property on a replaced/reloaded extension context.
+		void ctx.hasUI;
+		return true;
+	} catch (error) {
+		if (isStaleExtensionContextError(error)) return false;
+		throw error;
+	}
+}
+
+function notifyIfActive(
+	ctx: ExtensionContext,
+	message: string,
+	level: "info" | "warning" | "error" = "info",
+): void {
+	try {
+		notify(ctx, message, level);
+	} catch (error) {
+		if (!isStaleExtensionContextError(error)) throw error;
+	}
 }
 
 export default function midTurnCompact(pi: ExtensionAPI): void {
@@ -524,10 +560,16 @@ export default function midTurnCompact(pi: ExtensionAPI): void {
 	let compactsThisRun = 0;
 	let contextWindowPercent = DEFAULT_CONTEXT_WINDOW_PERCENT;
 	let boundaryContextWindowPercent: number | undefined;
+	let continuationLease: ContinuationLease | undefined;
 
-	const resetRunCounters = (): void => {
+	const abandonActiveBoundary = (): void => {
+		continuationLease = undefined;
 		inFlight = false;
 		boundaryContextWindowPercent = undefined;
+	};
+
+	const resetRunCounters = (): void => {
+		abandonActiveBoundary();
 		compactsThisRun = 0;
 	};
 
@@ -570,10 +612,8 @@ export default function midTurnCompact(pi: ExtensionAPI): void {
 		announce: boolean,
 	): void => {
 		enabled = nextEnabled;
-		if (!enabled) {
-			inFlight = false;
-			boundaryContextWindowPercent = undefined;
-		}
+		// Disabling blocks future admission but does not strand a task that this
+		// extension already aborted. Its current boundary retains one final resume.
 		pushFooterStatus(ctx);
 
 		try {
@@ -675,20 +715,31 @@ export default function midTurnCompact(pi: ExtensionAPI): void {
 		});
 	};
 
-	const resumeTask = (ctx: ExtensionContext, note: string): void => {
+	const resumeTask = (ctx: ExtensionContext, note: string, lease: ContinuationLease): void => {
+		// Symbol identity is both an ownership check and a one-shot claim. An old
+		// callback cannot act after a branch/task replacement, run twice, or clear
+		// state belonging to a newer boundary.
+		if (continuationLease !== lease) return;
+		continuationLease = undefined;
+
+		// ctx.compact() is fire-and-forget. Its callback may arrive after a
+		// session replacement or reload, when both this ctx and the captured pi
+		// API are stale. Abandon that old task rather than resuming the new one.
+		if (!isExtensionContextActive(ctx)) return;
 		try {
 			pi.sendUserMessage(MID_TURN_CONTINUE_PROMPT);
-			notify(ctx, note, "info");
 		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			notify(ctx, `Mid-turn compact resume failed: ${message}`, "error");
-		} finally {
-			inFlight = false;
-			boundaryContextWindowPercent = undefined;
+			if (!isStaleExtensionContextError(error)) {
+				const message = error instanceof Error ? error.message : String(error);
+				notifyIfActive(ctx, `Mid-turn compact resume failed: ${message}`, "error");
+			}
+			return;
 		}
+		notifyIfActive(ctx, note, "info");
 	};
 
 	const startMidTurnBoundary = (ctx: ExtensionContext): void => {
+		continuationLease = Symbol("mid-turn-compact-continuation");
 		inFlight = true;
 		boundaryContextWindowPercent = contextWindowPercent;
 		compactsThisRun += 1;
@@ -700,6 +751,15 @@ export default function midTurnCompact(pi: ExtensionAPI): void {
 	};
 
 	const compactAfterSettlement = (ctx: ExtensionContext): void => {
+		const lease = continuationLease;
+		// A branch/session/new-task boundary can revoke ownership before this
+		// settlement. Never reconstruct or resume an operation without its lease.
+		if (!lease) {
+			inFlight = false;
+			boundaryContextWindowPercent = undefined;
+			return;
+		}
+
 		// Consume this settlement before starting the fire-and-forget fallback.
 		// A compacted context reports tokens:null until its next assistant turn;
 		// that is evidence that pi already owned this forced boundary. Use the
@@ -709,7 +769,7 @@ export default function midTurnCompact(pi: ExtensionAPI): void {
 		boundaryContextWindowPercent = undefined;
 		const usage = ctx.getContextUsage();
 		if (!isOverSoftThreshold(usage?.tokens, usage?.contextWindow, DEFAULT_RESERVE_TOKENS, settledContextWindowPercent)) {
-			resumeTask(ctx, "Mid-turn compact done; resuming task.");
+			resumeTask(ctx, "Mid-turn compact done; resuming task.", lease);
 			return;
 		}
 
@@ -719,21 +779,35 @@ export default function midTurnCompact(pi: ExtensionAPI): void {
 		// and call/result pairing under server compaction remain 0017's concern.
 		ctx.compact({
 			onComplete: () => {
-				resumeTask(ctx, "Mid-turn compact done; resuming task.");
+				resumeTask(ctx, "Mid-turn compact done; resuming task.", lease);
 			},
 			onError: () => {
 				// Pi already renders compaction_end failures. Resume without emitting a
 				// second copy of the same error.
-				resumeTask(ctx, "Mid-turn compact failed; resuming without compaction.");
+				resumeTask(ctx, "Mid-turn compact failed; resuming without compaction.", lease);
 			},
 		});
 	};
 
-	// Keep an informational count across synthetic resumes; a real user prompt
-	// starts a new outer interaction and resets the display count.
+	// Claim task transfer as soon as input is accepted, including a queued steer
+	// or follow-up that has not reached before_agent_start yet. Preserve only this
+	// extension's own synthetic continuation.
+	pi.on("input", (event) => {
+		if (event.source !== "extension" || event.text !== MID_TURN_CONTINUE_PROMPT) {
+			abandonActiveBoundary();
+			compactsThisRun = 0;
+		}
+	});
+
+	// Keep an informational count across synthetic resumes. before_agent_start is
+	// also a fallback ownership boundary for host/programmatic paths that bypass
+	// the ordinary input event.
 	pi.on("before_agent_start", (event) => {
 		const prompt = typeof event.prompt === "string" ? event.prompt : "";
-		if (prompt !== MID_TURN_CONTINUE_PROMPT) compactsThisRun = 0;
+		if (prompt !== MID_TURN_CONTINUE_PROMPT) {
+			abandonActiveBoundary();
+			compactsThisRun = 0;
+		}
 	});
 
 	pi.on("session_start", (event, ctx) => {
@@ -741,7 +815,13 @@ export default function midTurnCompact(pi: ExtensionAPI): void {
 		pushFooterStatus(ctx);
 	});
 	pi.on("session_tree", resetRunCounters);
-	pi.on("model_select", resetRunCounters);
+	const preserveLeaseAcrossConfigurationChange = (): void => {
+		// Model and thinking configuration may change while manual compaction is
+		// pending. They do not transfer branch/task ownership, so the lease stays
+		// valid and the continuation uses Pi's then-current configuration.
+	};
+	pi.on("model_select", preserveLeaseAcrossConfigurationChange);
+	pi.on("thinking_level_select", preserveLeaseAcrossConfigurationChange);
 	pi.on("session_shutdown", (_event, ctx) => {
 		resetRunCounters();
 		clearFooterStatus(ctx);
