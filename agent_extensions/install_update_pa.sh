@@ -85,4 +85,5 @@ fi
 echo "Installing Prime Agent $TAG globally with npm..."
 npm install -g --no-fund --no-audit "./$TARBALL"
 
-echo "Installed $(prime-agent --version)"
+echo "Installed Prime Agent $TAG."
+prime-agent --version
