@@ -1,0 +1,3 @@
+# uv-managed Python test environment
+tests/py/.venv/
+tests/py/__pycache__/

@@ -1,0 +1,8 @@
+[project]
+name = "pa-openai-server-compaction-tests"
+version = "0.1.0"
+description = "Python/uv basic test harness for packages/pa-openai-server-compaction (mock Codex compaction endpoint + Node driver)"
+requires-python = ">=3.10"
+
+[tool.uv]
+package = false
