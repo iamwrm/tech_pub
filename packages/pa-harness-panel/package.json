@@ -1,0 +1,40 @@
+{
+  "name": "pa-harness-panel",
+  "version": "0.1.4",
+  "description": "Prime Agent extension: interactive TUI panel to skim the current continual-harness state (memory/prompt/skill/subagent entries + refinement history), rendered from raw harness_state.json.",
+  "private": true,
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "prime-agent",
+    "extension",
+    "harness",
+    "refine",
+    "tui"
+  ],
+  "files": [
+    "index.ts",
+    "tests",
+    "README.md",
+    "Changelog.md"
+  ],
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test tests/*.test.ts"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.7.0/prime-agent-0.7.0.tgz",
+    "@earendil-works/pi-tui": "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.7.0/prime-agent-tui-0.7.0.tgz",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  }
+}
