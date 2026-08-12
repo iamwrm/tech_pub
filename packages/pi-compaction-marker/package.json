@@ -1,0 +1,32 @@
+{
+  "name": "pi-compaction-marker",
+  "version": "0.1.3",
+  "description": "Pi extension that labels context compaction boundaries in /tree.",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "compaction"
+  ],
+  "files": [
+    "index.ts",
+    "0010-compaction-kept-marker.ts",
+    "README.md",
+    "Changelog.md"
+  ],
+  "scripts": {
+    "check": "tsc --noEmit"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.80.8",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}
