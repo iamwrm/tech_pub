@@ -1,0 +1,47 @@
+{
+  "name": "pi-btw",
+  "version": "0.2.0",
+  "description": "pi extension: /btw2 creates a same-model, same-thinking no-tool side branch and materializes it as a detached resumable session on demand.",
+  "private": true,
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "extension",
+    "side-chat",
+    "fork",
+    "session"
+  ],
+  "files": [
+    "index.ts",
+    "btw2.ts",
+    "detached-session.ts",
+    "side-tools.ts",
+    "terminal-safety.ts",
+    "tests",
+    "README.md",
+    "Changelog.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "npm run check && tsx --test tests/*.test.ts"
+  },
+  "pi": {
+    "extensions": [
+      "index.ts"
+    ]
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.8.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "^0.84.1",
+    "@earendil-works/pi-ai": "^0.84.1",
+    "@earendil-works/pi-coding-agent": "^0.84.1",
+    "@types/node": "^24.0.0",
+    "tsx": "latest",
+    "typescript": "latest"
+  }
+}
