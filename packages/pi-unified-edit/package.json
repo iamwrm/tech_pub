@@ -1,0 +1,41 @@
+{
+  "name": "pi-unified-edit",
+  "version": "0.1.1",
+  "description": "pi extension: vendored copy of mitsuhiko/agent-stuff unified-edit.ts — a drop-in replacement for the built-in edit tool accepting marked row scripts and Codex-style apply_patch payloads across multiple files.",
+  "private": true,
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "extension",
+    "edit",
+    "patch"
+  ],
+  "files": [
+    "unified-edit.ts",
+    "tests",
+    "README.md",
+    "Changelog.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "npm run check && tsx --test tests/*.test.ts"
+  },
+  "pi": {
+    "extensions": [
+      "unified-edit.ts"
+    ]
+  },
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.8.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.1",
+    "@earendil-works/pi-tui": "^0.84.1",
+    "@types/node": "^24.0.0",
+    "tsx": "latest",
+    "typescript": "latest"
+  }
+}
