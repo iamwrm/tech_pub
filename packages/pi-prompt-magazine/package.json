@@ -1,0 +1,44 @@
+{
+  "name": "pi-prompt-magazine",
+  "version": "0.1.0",
+  "description": "pi extension: multi-slot prompt stash queue ('magazine'). End a draft with ;; to stash it instead of sending; live queue widget above the prompt bar + /magazine browser (restore / peek / delete / reorder / clear).",
+  "private": true,
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "extension",
+    "stash",
+    "queue",
+    "magazine",
+    "tui"
+  ],
+  "files": [
+    "index.ts",
+    "magazine.ts",
+    "tests",
+    "README.md",
+    "Changelog.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "npm run check && tsx --test tests/*.test.ts"
+  },
+  "pi": {
+    "extensions": [
+      "index.ts"
+    ]
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.8.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "^0.84.1",
+    "@earendil-works/pi-coding-agent": "^0.84.1",
+    "@types/node": "^24.0.0",
+    "tsx": "latest",
+    "typescript": "latest"
+  }
+}
