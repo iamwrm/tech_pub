@@ -39,15 +39,16 @@ import { dirname, isAbsolute, resolve as resolvePath } from "node:path";
 import { pathToFileURL } from "node:url";
 import vm from "node:vm";
 
-// LOCAL (0.1.1): the extension ships three edit modes (row script, apply-patch,
-// code) and exactly ONE is active per process, selected by PI_UNIFIED_EDIT_MODE
-// (rows | patch | code, default patch). The model only ever sees the active
-// mode's prompt and payload dialect — no format choice, so no ambiguity.
-type EditMode = "rows" | "patch" | "code";
+// LOCAL (0.1.1): the extension ships four edit modes (row script, apply-patch,
+// code, pi-native JSON) and exactly ONE is active per process, selected by
+// PI_UNIFIED_EDIT_MODE (rows | patch | code | pi, default patch). The model
+// only ever sees the active mode's prompt and payload dialect — no format
+// choice, so no ambiguity.
+type EditMode = "rows" | "patch" | "code" | "pi";
 
 function getEditMode(): EditMode {
 	const mode = process.env.PI_UNIFIED_EDIT_MODE?.trim().toLowerCase();
-	if (mode === "rows" || mode === "code") return mode;
+	if (mode === "rows" || mode === "code" || mode === "pi") return mode;
 	return "patch";
 }
 
@@ -158,9 +159,30 @@ const CODE_GUIDELINES = [
 	"The tool refuses non-UTF-8 files (readFile throws) and never exposes require/process/network.",
 ];
 
+const PI_DESCRIPTION = `Edit files with a JSON payload matching pi's native edit tool: a path plus exact oldText/newText replacements.
+
+Format (single file):
+{"path": "a.txt", "edits": [{"oldText": "name = x", "newText": "name = y"}]}
+
+For multiple files, pass an array of such objects:
+[{"path": "a.txt", "edits": [{"oldText": "alpha", "newText": "ALPHA"}]}, {"path": "b.txt", "edits": [{"oldText": "beta", "newText": "BETA"}]}]
+
+Semantics: replacements are substring-based (they do not need to cover whole lines) and match exactly first, then with the same lenient normalization as the patch mode (trailing whitespace ignored; curly quotes, dashes and unicode spaces normalized). All edits are applied in order per file; the call is all-or-nothing — one failed replacement applies nothing. The tool refuses non-UTF-8 files and never creates new files (the path must already exist).`;
+
+const PI_SNIPPET =
+	"Edit files with pi's native JSON edit payload: {\"path\": ..., \"edits\": [{\"oldText\": ..., \"newText\": ...}]}.";
+
+const PI_GUIDELINES = [
+	"Read the target file first so your oldText matches the file's actual content — guessing content leads to repeated match failures.",
+	"oldText/newText are substrings: keep them small and unique; for whole-line changes include the line's exact text (a line without trailing spaces still matches a line that has them).",
+	"Multiple edits to one file are applied in array order; a single failed edit fails the whole call — re-read the error and resubmit everything.",
+	"One payload can edit several files (array form); the tool never creates files and refuses non-UTF-8/binary files.",
+];
+
 function modePrompt(mode: EditMode): { description: string; snippet: string; guidelines: string[] } {
 	if (mode === "patch") return { description: PATCH_DESCRIPTION, snippet: PATCH_SNIPPET, guidelines: PATCH_GUIDELINES };
 	if (mode === "code") return { description: CODE_DESCRIPTION, snippet: CODE_SNIPPET, guidelines: CODE_GUIDELINES };
+	if (mode === "pi") return { description: PI_DESCRIPTION, snippet: PI_SNIPPET, guidelines: PI_GUIDELINES };
 	return { description: ROWS_DESCRIPTION, snippet: ROWS_SNIPPET, guidelines: ROWS_GUIDELINES };
 }
 
@@ -207,7 +229,7 @@ type PlannedFileChange = {
 };
 
 type ParsedPlan = {
-	mode: "rows" | "patch" | "code";
+	mode: "rows" | "patch" | "code" | "pi";
 	code?: string;
 	cwd?: string;
 	changes: PlannedFileChange[];
@@ -1487,6 +1509,54 @@ function extractCodePayload(text: string): string {
 	throw new Error("Code mode payload is empty: expected ```js ... ``` (or js: ...) with code inside.");
 }
 
+// ============================================================================
+// Pi mode — pi's native JSON edit payload: {path, edits:[{oldText,newText}]}.
+// Substring replacements applied in order per file; all-or-nothing; the tool
+// never creates files.
+// ============================================================================
+
+type PiEditRequest = { path: string; edits: Array<{ oldText: string; newText: string }> };
+
+function isPiLikePayload(text: string): boolean {
+	const trimmed = text.trimStart();
+	// Object form, or array form that actually starts with a JSON object —
+	// a bare "[" is a row-script [path] header and must not be mistaken for JSON.
+	return trimmed.startsWith("{") || /^\[\s*\{/.test(trimmed);
+}
+
+async function buildPiPlan(text: string, cwd: string): Promise<ParsedPlan> {
+	let requests: PiEditRequest[];
+	try {
+		const parsed = JSON.parse(text);
+		requests = Array.isArray(parsed) ? parsed : [parsed];
+	} catch (err: any) {
+		throw new Error(`Pi mode: invalid JSON payload — ${err instanceof Error ? err.message : String(err)}`);
+	}
+	const store = createSnapshotStore(cwd, readExistingNormalized);
+	for (const req of requests) {
+		if (!req || typeof req.path !== "string" || !Array.isArray(req.edits) || req.edits.length === 0) {
+			throw new Error('Pi mode: each entry needs a "path" string and a non-empty "edits" array.');
+		}
+		for (const edit of req.edits) {
+			if (!edit || typeof edit.oldText !== "string" || typeof edit.newText !== "string") {
+				throw new Error('Pi mode: each edit needs string "oldText" and "newText".');
+			}
+			if (edit.oldText.length === 0) {
+				throw new Error("Pi mode: oldText must not be empty — the tool never creates files.");
+			}
+		}
+		const snapshot = await store.get(req.path);
+		if (snapshot.current === null) throw new Error(`Cannot edit deleted file ${req.path}.`);
+		let content = snapshot.current;
+		for (const edit of req.edits) {
+			content = applyEditsToNormalizedContent(content, [{ oldText: edit.oldText, newText: edit.newText }], req.path)
+				.newContent;
+		}
+		snapshot.current = content;
+	}
+	return { mode: "pi", changes: store.collectChanges("The pi edit produced no changes.") };
+}
+
 type CodeWrite = {
 	path: string;
 	absolutePath: string;
@@ -1621,6 +1691,14 @@ async function buildPlanForMode(text: string, cwd: string, mode: EditMode, argsC
 		}
 		return buildPatchPlan(text, cwd);
 	}
+	if (mode === "pi") {
+		if (!isPiLikePayload(text)) {
+			throw new Error(
+				'This edit tool is configured for pi mode (PI_UNIFIED_EDIT_MODE=pi). Send a JSON payload: {"path": ..., "edits": [{"oldText": ..., "newText": ...}]}.',
+			);
+		}
+		return buildPiPlan(text, cwd);
+	}
 	if (mode === "code") {
 		if (!isCodeLikePayload(text)) {
 			throw new Error(
@@ -1630,7 +1708,7 @@ async function buildPlanForMode(text: string, cwd: string, mode: EditMode, argsC
 		return buildCodePlan(text, cwd);
 	}
 	// rows mode: reject the other dialects so the model never mixes formats
-	if (isPatchLikePayload(text) || isCodeLikePayload(text)) {
+	if (isPatchLikePayload(text) || isCodeLikePayload(text) || isPiLikePayload(text)) {
 		throw new Error(
 			"This edit tool is configured for row-script mode (PI_UNIFIED_EDIT_MODE=rows). Use [path] sections with @REPLACE/@INS.PRE/@INS.POST/@INS.BEFORE/@INS.AFTER/@APPEND/@DEL — the payload does not start with a [filename] header.",
 		);

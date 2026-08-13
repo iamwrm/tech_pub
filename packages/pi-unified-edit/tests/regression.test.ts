@@ -33,7 +33,7 @@ function registerTool(): ToolDefinition<any, any> {
 
 type ExecuteResult = Awaited<ReturnType<NonNullable<ToolDefinition<any, any>["execute"]>>>;
 
-type TestMode = "rows" | "patch" | "code";
+type TestMode = "rows" | "patch" | "code" | "pi";
 
 async function runEdit(cwd: string, text: string, mode: TestMode = "patch"): Promise<ExecuteResult> {
 	const prev = process.env.PI_UNIFIED_EDIT_MODE;
@@ -987,6 +987,107 @@ test("J3: real change-context (@@ with trailing text) still works", async () => 
 			"patch",
 		);
 		assert.equal(readFileSync(join(root, "ctx.txt"), "utf8"), "alpha\nBETA\n");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+// ============================================================================
+// K. Pi mode (native JSON payload: {path, edits:[{oldText,newText}]})
+// ============================================================================
+
+test("K1: pi-mode JSON payload replaces substrings", async () => {
+	const root = tempDir();
+	try {
+		writeFileSync(join(root, "a.txt"), "name = x\nport = 80\n");
+		await runEdit(root, JSON.stringify({ path: "a.txt", edits: [{ oldText: "name = x", newText: "name = y" }] }), "pi");
+		assert.equal(readFileSync(join(root, "a.txt"), "utf8"), "name = y\nport = 80\n");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("K2: pi-mode multi-file array form", async () => {
+	const root = tempDir();
+	try {
+		writeFileSync(join(root, "a.txt"), "alpha\n");
+		writeFileSync(join(root, "b.txt"), "beta\n");
+		const payload = JSON.stringify([
+			{ path: "a.txt", edits: [{ oldText: "alpha", newText: "ALPHA" }] },
+			{ path: "b.txt", edits: [{ oldText: "beta", newText: "BETA" }] },
+		]);
+		await runEdit(root, payload, "pi");
+		assert.equal(readFileSync(join(root, "a.txt"), "utf8"), "ALPHA\n");
+		assert.equal(readFileSync(join(root, "b.txt"), "utf8"), "BETA\n");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("K3: pi-mode substring edits apply in order per file", async () => {
+	const root = tempDir();
+	try {
+		writeFileSync(join(root, "s.txt"), "abc\n");
+		const payload = JSON.stringify({
+			path: "s.txt",
+			edits: [
+				{ oldText: "abc", newText: "abXc" },
+				{ oldText: "Xc", newText: "XYc" },
+			],
+		});
+		await runEdit(root, payload, "pi");
+		assert.equal(readFileSync(join(root, "s.txt"), "utf8"), "abXYc\n");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("K4: pi-mode one failed edit applies nothing (all-or-nothing)", async () => {
+	const root = tempDir();
+	try {
+		writeFileSync(join(root, "a.txt"), "keep\n");
+		const payload = JSON.stringify({
+			path: "a.txt",
+			edits: [
+				{ oldText: "keep", newText: "KEPT" },
+				{ oldText: "does-not-exist", newText: "x" },
+			],
+		});
+		const err = await runEditError(root, payload, "pi");
+		assert.match(err.message, /No changes were applied/);
+		assert.equal(readFileSync(join(root, "a.txt"), "utf8"), "keep\n");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("K5: pi-mode rejects invalid JSON, empty oldText, and missing files", async () => {
+	const root = tempDir();
+	try {
+		writeFileSync(join(root, "a.txt"), "x\n");
+		const err1 = await runEditError(root, "{not json", "pi");
+		assert.match(err1.message, /invalid JSON/);
+		const err2 = await runEditError(root, JSON.stringify({ path: "a.txt", edits: [{ oldText: "", newText: "y" }] }), "pi");
+		assert.match(err2.message, /oldText must not be empty/);
+		const err3 = await runEditError(root, JSON.stringify({ path: "nope.txt", edits: [{ oldText: "x", newText: "y" }] }), "pi");
+		assert.match(err3.message, /Could not read|ENOENT/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("K6: pi mode rejects non-pi payloads with a clear hint", async () => {
+	const root = tempDir();
+	try {
+		writeFileSync(join(root, "f.txt"), "x\n");
+		const err = await runEditError(root, ["[f.txt]", "@REPLACE", "-x", "+y"].join("\n"), "pi");
+		assert.match(err.message, /configured for pi mode/);
+		const err2 = await runEditError(
+			root,
+			["*** Begin Patch", "*** Update File: f.txt", "@@ x", "-x", "+y", "*** End Patch"].join("\n"),
+			"pi",
+		);
+		assert.match(err2.message, /configured for pi mode/);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

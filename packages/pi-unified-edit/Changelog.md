@@ -3,6 +3,19 @@
 
 ## [0.1.1] - 2026-08-12
 
+- **Pi mode (`PI_UNIFIED_EDIT_MODE=pi`).** Fourth dialect: pi's native JSON
+  edit payload `{"path": ..., "edits": [{"oldText": ..., "newText": ...}]}`
+  (array form for multiple files). Substring replacements applied in array
+  order per file; all-or-nothing; never creates files; same lenient
+  normalization as patch mode. Detection is `{` or `[{`-prefixed only, so a
+  row-script `[path]` header is never mistaken for JSON. Tests K1-K6
+  (substring, multi-file, ordering, atomicity, validation, mode gate): 76.
+  **Evidence (E1-E24 x 4 models, 2026-08-13)**: first-try success is
+  strongly model-dependent — luna 22/24, opus 18/22, ds 15/24, sol 2/24
+  (sol retries the JSON dialect heavily). Patch stays the default; the pi
+  mode exists for side-by-side comparison and as the control proving why
+  the built-in JSON edit was replaced.
+
 - Local modifications to the vendored copy (upstream pinned at
   `13bc8f87`, 2026-08-10; every changed site marked `// LOCAL (0.1.1):`).
   Review-driven: P0-1/P0-2/P1-3/P1-4 proposals validated by a 5-agent
