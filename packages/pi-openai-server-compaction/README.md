@@ -21,6 +21,16 @@ ownership: [IV-0003](../docs/IV-DC/IV-0003-openai-server-compaction.md).
     JSON, ordinary Bearer auth);
   - **xAI** — `xai/grok-4.6` via `POST https://api.x.ai/v1/responses/compact`
     (same standard-responses-json adapter, exact-model bound).
+
+"Compaction V2" is the strategy name (`openai-responses-compaction-v2`) for
+both wire protocols above, not a third protocol: the Codex route uses the
+Codex-subscription `compaction_trigger` + named SSE variant, while the Fluxion
+mirror and xAI routes use the standard standalone compaction contract OpenAI
+exposes at `/v1/responses/compact` (unary JSON, one opaque `cmp_…` artifact,
+canonical output replayed as-is). Grok/xAI therefore fully supports V2 through
+`/responses/compact`; it only lacks the Codex-specific trigger/SSE variant, and
+no adapter uses OpenAI's automatic `context_management`/`compact_threshold`
+in-request compaction.
 - Captures the **exact final provider payload** after Pi's complete
   provider-request hook chain through protocol-specific stream decorators, so
   the compaction request preserves instructions, tools, reasoning, cache keys,
