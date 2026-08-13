@@ -32,7 +32,9 @@ function resultText(result: ExecuteResult): string {
     .join("\n");
 }
 
-async function runEdit(cwd: string, text: string): Promise<ExecuteResult> {
+async function runEdit(cwd: string, text: string, mode: string = "rows"): Promise<ExecuteResult> {
+  const prev = process.env.PI_UNIFIED_EDIT_MODE;
+  process.env.PI_UNIFIED_EDIT_MODE = mode;
   const definition = registerTool();
   const params = (definition.prepareArguments as (args: unknown) => any)({ text });
   return definition.execute("smoke-call", params, undefined, undefined, { cwd } as any);
@@ -125,7 +127,7 @@ test("patch mode: add, update with context hunks, and delete files", async () =>
       "+beta2",
       "*** Delete File: gone.txt",
       "*** End Patch",
-    ].join("\n"));
+    ].join("\n"), "patch");
     assert.match(resultText(result), /3 file\(s\)/);
     assert.equal(readFileSync(join(root, "new.txt"), "utf8"), "hello\nworld\n");
     assert.equal(readFileSync(join(root, "old.txt"), "utf8"), "alpha\nbeta2\ngamma\n");
@@ -143,7 +145,7 @@ test("patch mode: delete-file on a missing file fails before mutating anything",
         "*** Begin Patch",
         "*** Delete File: missing.txt",
         "*** End Patch",
-      ].join("\n")),
+      ].join("\n"), "patch"),
       /does not exist/,
     );
     assert.equal(readFileSync(join(root, "keep.txt"), "utf8"), "keep\n");

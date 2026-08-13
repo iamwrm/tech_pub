@@ -56,6 +56,12 @@ preflight-detectable failures.
   and bounded row content; duplicate errors name occurrence lines; update-kind
   drift guard ("file content changed since preflight (expected N, found M)").
 - **Atomicity**: guarded best-effort mid-apply rollback (see above).
+- **Binary safety**: every file-read path (plan building, preview, apply
+  phase, rollback snapshots) now validates UTF-8 and **rejects files
+  containing invalid byte sequences** instead of lossy-decoding them — a
+  lossy read silently replaced invalid bytes with U+FFFD on write, corrupting
+  binary files even when the edit touched other lines. Valid UTF-8 (including
+  NUL bytes) is unaffected.
 - **Docs**: `TOOL_DESCRIPTION`/`TOOL_PROMPT_GUIDELINES` state the exact fuzzy
   scope, the column-0 rule and the context-row single-space rule.
 
@@ -68,6 +74,22 @@ pi list   # verify
 ```
 
 Remove with `pi remove pi-unified-edit`.
+
+## Mode selection
+
+The extension ships three edit dialects (row script, apply-patch, code) and
+activates exactly ONE per process — the model only ever sees the active
+dialect's prompt, so it never has to choose a format:
+
+```bash
+PI_UNIFIED_EDIT_MODE=patch  pi ...   # default: apply-patch (*** Begin Patch ... *** End Patch)
+PI_UNIFIED_EDIT_MODE=rows   pi ...   # row scripts ([path] + @REPLACE/@INS/@DEL/@APPEND)
+PI_UNIFIED_EDIT_MODE=code   pi ...   # js: payloads with readFile/readLines/writeFile
+```
+
+Payloads in a non-active dialect are rejected with a hint naming the
+configured mode. `PI_UNIFIED_EDIT_MODE` is read at extension registration
+(process start); set it in the environment before launching pi.
 
 > The tool registers the name `edit`, shadowing the built-in tool. If this
 > extension fails to load or is removed, pi falls back to its built-in `edit`.

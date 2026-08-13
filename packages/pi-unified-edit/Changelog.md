@@ -50,16 +50,82 @@
     the column-0 header rule, the fuzzy scope (trailing whitespace ignored;
     quotes/dashes/unicode spaces normalized; internal/leading whitespace
     exact), the diff-style separator semantics, the blank context row, and
-    the new parse errors.
+    the new parse errors. Follow-up: hunk row order is now explicit —
+    replacement `+` rows must directly follow their `-` rows; a `+` row
+    after a context row is a context-anchored insertion (inserts after that
+    context line) rather than a replacement.
+  - **Prompt slimming (DC-0004 adoption gate).** `TOOL_DESCRIPTION` +
+    `TOOL_PROMPT_GUIDELINES` reduced from 6369 to 2877 chars (-55%) by
+    de-duplicating the rule text (fuzzy-match and diff-style-separator
+    semantics were stated three times) and shrinking the guidelines to
+    strategy-only reminders. Validated via the E1-E12 edit-task pack
+    (local_data/edit-ab): baseline 36/36 across
+    deepseek-v4-flash:max / gpt-5.6-sol:high / gpt-5.6-luna:max, and the
+    slimmed surface also 36/36 (no regression). Behavior unchanged; only
+    the injected prompt text changed.
+  - **Failure diagnostics (session-driven).** Two failure patterns from a
+    live session (package-removal surgery, deepseek-v4-flash:max): (a) the
+    model assumed earlier ops of a multi-op script still applied after a
+    later op failed — every plan-building failure (parse, match, non-UTF-8)
+    now appends "No changes were applied — row scripts are all-or-nothing";
+    (b) unmatched rows whose text exists in the file with a different
+    leading format (indentation, numbered `4.` vs bullet) now get a
+    "similar line with different leading format" note naming the exact file
+    line. Guidelines gained a rule to copy exact leading formats in
+    multi-op scripts. Tests G1-G4 (+ C3 updated): 54 total.
+  - **Code mode (dual-track).** Payloads prefixed with `js:` or a ```js fence
+    run as TypeScript/JavaScript in a `node:vm` sandbox with three
+    whitelisted synchronous APIs: `readFile(path) -> string`,
+    `readLines(path) -> string[]`, `writeFile(path, content)`. Paths resolve
+    against the cwd; `readFile` refuses non-UTF-8 files; an exception (or
+    syntax error, caught at plan build) rolls back every `writeFile` of the
+    call — all-or-nothing like the row modes. Multiple writes to one file
+    keep the last content; files created by the call are deleted on rollback.
+    The result is a diff per written file, and the preview shows the code
+    (it is not executed early). Tests H1-H8: 62 total.
+  - **Single-mode selection.** The extension ships all three dialects (row
+    script, apply-patch, code) but exactly ONE is active per process, chosen
+    by `PI_UNIFIED_EDIT_MODE=rows|patch|code` (default rows). The registered
+    tool's description/snippet/guidelines and the payload gate all follow the
+    active mode: payloads in a non-active dialect are rejected with a clear
+    hint naming the configured mode. The model never sees multiple formats,
+    so it never has to choose. Per-mode prompts: ROWS_*/PATCH_*/CODE_*.
+    Tests I1-I5 (mode isolation + end-to-end per mode): 67 total.
+  - **Default mode: patch (E1-E12 evidence).** `PI_UNIFIED_EDIT_MODE` now
+    defaults to `patch` (was rows). The E1-E12 edit-task pack across
+    deepseek-v4-flash:max / gpt-5.6-sol:high / gpt-5.6-luna:max showed all
+    three dialects at 36/36 completion, but the apply-patch dialect was the
+    only one with a 36/36 first-try success rate (zero failed edit calls;
+    rows had one retry in ds, code had model self-corrections on e8/e12),
+    and luna's recurring e11 API stalls disappeared under patch (32s
+    early-ok vs 5 hangs in rows/code). Data supports patch as the format
+    models are least likely to get wrong; rows/code stay available via env.
+  - **Patch guidelines: read-before-patch.** A live trap case (sol x e23,
+    11 failed guesses) showed the patch dialect's guidelines were missing the
+    "read the target file first" rule that the row-script mode already had —
+    the model trusted task text over file content and guessed hunks until a
+    unique line happened to match. Added "Read the target file first and copy
+    the exact lines into your hunk: the hunk must match the file's actual
+    content, not what the task text implies." Re-run: 1 edit + 1 read, one
+    try. Also fixed the case instrument ambiguity that seeded the guesses.
   - **Tests.** New `tests/regression.test.ts` (37 cases: parser strictness,
     matching-semantics locks incl. the upstream whitespace-only-needle hang
     fix, internal-whitespace strictness, the diff-style separator matrix,
     diagnostics, and chmod-0555 rollback/abort atomicity). Total suite: 44.
+  - **Binary safety (post-review).** All file-read paths now validate UTF-8
+    and reject files with invalid byte sequences (`NotUtf8Error`, "Refusing
+    to edit binary or misencoded files") instead of lossy-decoding them —
+    previously ANY edit to such a file silently replaced the invalid bytes
+    with U+FFFD on write. Applies to plan building, preview, the apply phase
+    (`readFileForMutation`) and rollback snapshots (`readRawBytes` returns
+    null for non-UTF-8). Valid UTF-8 including NUL bytes is unaffected.
+  - **Tests.** F-series regression tests F1–F6: row-script @REPLACE/@APPEND,
+    patch-mode Update File, multi-file atomicity, NUL-byte boundary, and the
+    apply-phase last-line-of-defense. Total suite: 50.
   - **Test-only exports.** `__test` export surface (`parseRowScript`,
     `applyRowOperations`, `applyPlan`, `applyUpdateChange`,
     `applyEditsToNormalizedContent`) for regression coverage.
 
-## [0.1.0] - 2026-08-11
 ## [0.1.0] - 2026-08-11
 
 - Initial vendored copy of

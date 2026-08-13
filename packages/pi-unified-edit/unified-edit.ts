@@ -31,30 +31,47 @@ import {
 	type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import { Box, Container, getCapabilities, hyperlink, Spacer, Text, type Component } from "@earendil-works/pi-tui";
-import { constants } from "node:fs";
+import { constants, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { isUtf8 } from "node:buffer";
 import { access, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, resolve as resolvePath } from "node:path";
 import { pathToFileURL } from "node:url";
+import vm from "node:vm";
 
-const TOOL_DESCRIPTION = `Edit files with one marked row edit script.
+// LOCAL (0.1.1): the extension ships three edit modes (row script, apply-patch,
+// code) and exactly ONE is active per process, selected by PI_UNIFIED_EDIT_MODE
+// (rows | patch | code, default patch). The model only ever sees the active
+// mode's prompt and payload dialect — no format choice, so no ambiguity.
+type EditMode = "rows" | "patch" | "code";
 
-Row edit script format:
-[filename]
-@OPERATION
-+insert row text
--delete row text
+function getEditMode(): EditMode {
+	const mode = process.env.PI_UNIFIED_EDIT_MODE?.trim().toLowerCase();
+	if (mode === "rows" || mode === "code") return mode;
+	return "patch";
+}
 
-Every non-header line must be clearly marked: file headers use [path] and must start in column 0, operations use @, inserted content rows use +, deleted content rows use -. To insert or delete a real line that starts with +, -, or @, add the row marker first (for example ++literal plus, --literal minus, +@decorator). Content that starts with [ must also use -/+ rows: a "[...]" line in column 0 is always a file header, and an indented "[...]" line is only valid as an @REPLACE context row. In @REPLACE, unified-diff style context rows starting with exactly one leading space are allowed and are used to locate a contiguous hunk; the remainder is matched with the same fuzzy normalization as - rows (trailing whitespace ignored; curly quotes/dashes and unicode spaces normalized; internal and leading whitespace stays exact). A single leading space after a row marker is treated as a diff-style separator: when the exact content does not match, the whole op is re-read diff-style (one leading space consumed after every -/+ and context marker) and applied — you may write rows in either style, as long as a script is consistent within one op. A space-only row (a single space) inside @REPLACE is a blank context row. Use @@ inside @REPLACE to separate multiple hunks.
+const ROWS_DESCRIPTION = `Edit files with one marked row edit script. Multiple [path] sections per call; all-or-nothing.
+Edit files with one marked row edit script. Multiple [path] sections per call; all-or-nothing.
 
-Supported row operations:
-@INS.PRE N       insert following + rows before 1-based line N
-@INS.POST N      insert following + rows after 1-based line N
-@INS.BEFORE      insert + rows before the located - anchor block using pi's edit matcher (anchor rows accept a diff-style separator: one leading space)
-@INS.AFTER       insert + rows after the located - anchor block using pi's edit matcher (anchor rows accept a diff-style separator: one leading space)
-@REPLACE         replace deleted-row blocks with inserted-row blocks using pi's edit matcher; - then + and + then - are both accepted. Space-prefixed context rows are allowed for unified-diff style hunks, including context-anchored insertions (a context-only hunk is an error: it cannot locate a change). Use @@ inside @REPLACE to separate multiple context hunks. Matching is whole-line: exact first, then fuzzy (trailing whitespace ignored; curly quotes/dashes and unicode spaces normalized; internal and leading whitespace exact); a diff-style separator (one leading space) after -/+ and context markers is tolerated: when exact matching fails, the whole op is re-read diff-style and applied. Uniqueness is checked per op and overlap between hunks is rejected. A - row must not be empty; @@ is only valid inside @REPLACE; context rows are rejected under @INS.BEFORE/@INS.AFTER.
-@APPEND          append following + rows at the end of the file
-@DEL N-M         delete lines N through M inclusive; @DEL N also deletes one line; @DEL N..M, @DEL N..=M, and @DEL N.=M are accepted aliases
+Format:
+[path]
+@OP
++inserted row
+-deleted row
+
+Headers start in column 0; an indented "[...]" row is an @REPLACE context row. Content rows are marked; to write a literal row starting with +, -, @ or [, keep the marker and repeat the char: ++plus, --minus, +@at, +[bracket. Every row must have a marker.
+
+Operations:
+@REPLACE     replace the - block with the + block that directly follows it. Space-prefixed context rows (exactly one leading space) anchor the hunk; + rows after a context row insert AFTER it. @@ separates hunks. Matching: whole-line, exact first, then fuzzy (trailing whitespace ignored; curly quotes, dashes and unicode spaces normalized; leading and internal whitespace exact). A leading space after a row marker is a diff-style separator: on exact-match failure the op is re-read with one space stripped from every -/+/context row — keep one style per op. The -/+ block must be unique; overlap is rejected; a - row must not be empty.
+@INS.PRE N    insert + rows before 1-based line N
+@INS.POST N   insert + rows after 1-based line N
+@INS.BEFORE   insert + rows before the - anchor block
+@INS.AFTER    insert + rows after the - anchor block
+@APPEND       append + rows at the end
+@DEL N-M      delete lines N..M (aliases: N..M, N..=M, N.=M; @DEL N deletes one line)
+
+Line-number ops apply sequentially in script order.
 
 Examples:
 [package.json]
@@ -63,32 +80,89 @@ Examples:
 +  "version": "1.0.1",
 
 [src/main.ts]
-@INS.PRE 1
-+import { foo } from "./foo";
 @INS.AFTER
 -function main() {
 +  setupFoo();
 @DEL 20-23
 @APPEND
 +
-+export { foo };`;
++export { foo };
 
-const TOOL_PROMPT_SNIPPET =
+Code mode (alternative): prefix the payload with \`\`\`js (or js:) and edit files with JavaScript instead of row scripts. Whitelisted synchronous APIs: readFile(path) -> string, readLines(path) -> string[], writeFile(path, content). Paths resolve against the cwd; readFile refuses non-UTF-8 files. An exception rolls back every writeFile of the call.
+Example:
+\`\`\`js
+const s = readFile("config.ini");
+writeFile("config.ini", s.replace("name = x", "name = y"));
+\`\`\``;
+
+const ROWS_SNIPPET =
 	"Edit files using one marked row script ([file], @operations, + insert rows, - delete rows).";
 
-const TOOL_PROMPT_GUIDELINES = [
-	"Use edit for file changes when you can express them as marked row operations.",
-	"For edit row scripts, start each file section with [path/to/file], then use operation lines like @REPLACE, @INS.PRE N, @INS.POST N, @INS.BEFORE, @INS.AFTER, @DEL N-M, or @APPEND.",
-	"For edit row scripts, every content row must have a marker: use + for inserted rows and - for deleted rows. To insert a literal line that starts with +, -, or @, keep the + row marker and put the literal character after it.",
-	"Do not add unnecessary context lines to row scripts; only include the - rows needed to uniquely locate a replacement or insertion anchor and the + rows to insert.",
-	"In @REPLACE, space-prefixed context rows (exactly one leading space) are supported for unified-diff style hunks and context-anchored insertions; use @@ inside @REPLACE to separate multiple context hunks. File headers ([path]) must start in column 0; content starting with [ must use -/+ rows.",
-	"Prefer @REPLACE with the smallest unique deleted block plus replacement rows for precise changes. Row-mode matching is whole-line: exact first, then fuzzy (trailing whitespace ignored; curly quotes/dashes and unicode spaces normalized; internal and leading whitespace stays exact). A single leading space after a row marker is a diff-style separator: when the exact content does not match, the whole op is re-read diff-style (one leading space consumed after every -/+ and context marker) and applied — write rows in either style, consistently within one op. Uniqueness is checked per op on normalized content; overlapping hunks are rejected. A - row must not be empty; @@ outside @REPLACE and space-prefixed context rows under @INS.BEFORE/@INS.AFTER are parse errors.",
-	"When a match fails, the error names the failing block with its row content: re-read the file and compare exact whitespace and punctuation (the diff-style separator is already tried automatically; a space-only row inside @REPLACE is a blank context row; @APPEND/@INS.PRE/@INS.POST rows insert content verbatim).",
-	"Consecutive + rows or - rows form one block; for multiple replacements, use separate @REPLACE operations, alternating +/- block pairs, or @@-separated context hunks.",
-	"Use @INS.BEFORE/@INS.AFTER with - rows for the anchor to avoid brittle line numbers when there is a unique nearby line or block.",
-	"Use @INS.PRE/@INS.POST or @DEL only when line numbers are reliable from a recent read; line-number operations are applied sequentially in script order.",
-	"Use @DEL N-M for inclusive line ranges. @DEL N deletes one line. Multiple [file] sections are allowed in one edit call.",
+const ROWS_GUIDELINES = [
+	"1. For each change, pick the operation with the smallest unique - block: prefer @REPLACE with - then + (a + row after a context row inserts after that line, it does not replace). Add one context row only when the - block alone is ambiguous.",
+	"2. Anchored ops (@INS.BEFORE/@INS.AFTER, @REPLACE with context) beat line numbers unless you just read the file; line numbers are sequential and shift as earlier ops apply.",
+	"3. Copy the file's exact whitespace into your rows: fuzzy matching ignores only trailing whitespace and normalizes quotes/dashes/unicode spaces — indentation and inner spacing must match exactly. A row without the trailing spaces still matches a line that has them.",
+	"4. To delete a blank line use @DEL N — an empty - row is a parse error. To delete a line starting with +, - or @, keep the - marker and repeat the char (--minus deletes -minus).",
+	"5. If the tool reports a match failure it already tried the diff-style separator: re-read the file and compare whitespace/punctuation before retrying; the error names the failing block.",
+	"6. Before a multi-op script, read the target file and copy each row's exact leading format (indentation; numbered items like `4.` vs bullet `- `). A single unmatched row fails the whole script — nothing is applied.",
+	"7. Prefer one call for several files. The tool never creates files (@APPEND needs an existing file) and refuses non-UTF-8/binary files.",
 ];
+
+const PATCH_DESCRIPTION = `Edit files with a single apply-patch payload (OpenAI/Codex unified-diff format). All-or-nothing: one unmatched hunk fails the whole patch.
+Format:
+*** Begin Patch
+*** Add File: new.txt
++line one
++line two
+*** Delete File: old.txt
+*** Update File: src/main.ts
+@@ -1,3 +1,3 @@
+ context line (a space prefix)
+-removed line
++added line
+*** End Patch
+
+Ops: *** Add File (lines prefixed +), *** Delete File, *** Update File with @@ hunks (space-prefixed context lines, - removed, + added; multiple hunks per file; @@ with trailing text is a change-context anchor that must exist before the hunk), *** Move to: (rename after an Update File), *** End of File (anchor the last hunk at the file end). Trailing empty context lines can be omitted.
+
+Matching is deliberately lenient: exact match first, then trailing-whitespace ignored, then both-sides whitespace ignored, then common Unicode punctuation (curly quotes, en/em dashes, non-breaking spaces) normalized to ASCII. You do not need the file's exact whitespace; a hunk whose lines differ only in whitespace or typographic punctuation still applies. Context lines must be unique enough to locate the change; if a hunk fails, the error names the file and the expected lines.
+
+The tool never creates parent directories for Add, refuses non-UTF-8 files, and reports failures without applying anything.`;
+
+const PATCH_SNIPPET =
+	"Edit files with an apply-patch payload: *** Begin Patch ... *** End Patch (Add/Delete/Update File + @@ hunks).";
+
+const PATCH_GUIDELINES = [
+	"Read the target file first and copy the exact lines into your hunk: the hunk must match the file's actual content, not what the task text implies. Guessing content leads to repeated match failures. For large files, read only the relevant lines (use the read tool's offset/limit) instead of the whole file.",
+	"Always wrap the whole payload in *** Begin Patch ... *** End Patch; every content line needs a prefix (space context, - removed, + added).",
+	"Prefer the smallest unique hunk: include only the context lines needed to pin the location; for a file-end append use *** End of File after the last hunk.",
+	"Matching is lenient (whitespace and typographic punctuation are normalized), but the hunk must still match some region — copy the line text itself exactly.",
+	"One failed hunk fails the whole patch and nothing is applied: re-read the error, fix the failing hunk, and resubmit the entire patch.",
+	"Use one patch for several files; the tool never creates files it is not told to Add and refuses non-UTF-8/binary files.",
+];
+
+const CODE_DESCRIPTION = `Edit files by running TypeScript/JavaScript in a sandbox. Prefix the payload with js: (or wrap it in a \`\`\`js fence) and use the whitelisted synchronous APIs: readFile(path) -> string, readLines(path) -> string[], writeFile(path, content). Paths resolve against the cwd. readFile refuses non-UTF-8 files; writeFile creates missing files. An exception rolls back every writeFile of the call (all-or-nothing).
+
+Example:
+\`\`\`js
+const s = readFile("config.ini");
+writeFile("config.ini", s.replace("name = x", "name = y"));
+\`\`\``;
+
+const CODE_SNIPPET =
+	"Edit files with JavaScript: js: payload using readFile/readLines/writeFile (whitelisted sandbox APIs).";
+
+const CODE_GUIDELINES = [
+	"Begin the payload with js: (or a ```js fence) and use only readFile/readLines/writeFile/console.",
+	"Prefer the smallest precise string operation: read the file, transform the string, write it back.",
+	"An exception rolls back every writeFile of the call — no partial edits survive a failure.",
+	"The tool refuses non-UTF-8 files (readFile throws) and never exposes require/process/network.",
+];
+
+function modePrompt(mode: EditMode): { description: string; snippet: string; guidelines: string[] } {
+	if (mode === "patch") return { description: PATCH_DESCRIPTION, snippet: PATCH_SNIPPET, guidelines: PATCH_GUIDELINES };
+	if (mode === "code") return { description: CODE_DESCRIPTION, snippet: CODE_SNIPPET, guidelines: CODE_GUIDELINES };
+	return { description: ROWS_DESCRIPTION, snippet: ROWS_SNIPPET, guidelines: ROWS_GUIDELINES };
+}
 
 const unifiedEditSchema = {
 	type: "object",
@@ -97,7 +171,7 @@ const unifiedEditSchema = {
 	properties: {
 		text: {
 			type: "string",
-			description: TOOL_DESCRIPTION,
+			description: "The edit payload in the tool's configured dialect (row script, apply-patch, or js: code).",
 		},
 	},
 } as any;
@@ -133,7 +207,9 @@ type PlannedFileChange = {
 };
 
 type ParsedPlan = {
-	mode: "rows" | "patch";
+	mode: "rows" | "patch" | "code";
+	code?: string;
+	cwd?: string;
 	changes: PlannedFileChange[];
 };
 
@@ -586,19 +662,41 @@ function resolveToCwd(cwd: string, path: string): string {
 	return isAbsolute(normalized) ? resolvePath(normalized) : resolvePath(cwd, normalized);
 }
 
+
+// LOCAL (0.1.1): strict UTF-8 read used by every file-read path. A lossy
+// read (fs.readFile with "utf-8") silently replaces invalid byte sequences
+// with U+FFFD, and since edits rewrite the whole file, ANY edit to a binary
+// or misencoded file corrupted those bytes. Reject instead.
+class NotUtf8Error extends Error {
+	constructor(path: string) {
+		super(
+			`Could not read ${path}: file is not valid UTF-8 (contains invalid byte sequences). Refusing to edit binary or misencoded files.`,
+		);
+		this.name = "NotUtf8Error";
+	}
+}
+
+async function readFileUtf8Strict(path: string, absolutePath: string): Promise<string> {
+	const buf = await readFile(absolutePath);
+	if (!isUtf8(buf)) throw new NotUtf8Error(path);
+	return buf.toString("utf-8");
+}
+
 async function readExistingNormalized(path: string, absolutePath: string): Promise<string> {
 	try {
-		return normalizeToLF(stripBom(await readFile(absolutePath, "utf-8")).text);
+		return normalizeToLF(stripBom(await readFileUtf8Strict(path, absolutePath)).text);
 	} catch (err: any) {
+		if (err instanceof NotUtf8Error) throw err;
 		const code = err && typeof err === "object" && "code" in err ? ` (${err.code})` : "";
 		throw new Error(`Could not read ${path}${code}.`);
 	}
 }
 
-async function maybeReadNormalized(absolutePath: string): Promise<string | null> {
+async function maybeReadNormalized(path: string, absolutePath: string): Promise<string | null> {
 	try {
-		return normalizeToLF(stripBom(await readFile(absolutePath, "utf-8")).text);
+		return normalizeToLF(stripBom(await readFileUtf8Strict(path, absolutePath)).text);
 	} catch (err: any) {
+		if (err instanceof NotUtf8Error) throw err;
 		if (err?.code === "ENOENT") return null;
 		throw err;
 	}
@@ -906,12 +1004,28 @@ function rowEditFromPair(pair: { oldLines: string[]; newLines: string[] }, delet
 // and op ordinal so the model can fix the script without re-reading the file.
 // Payload is bounded (rows truncated to 80 chars, max 5 rows) and derived only
 // from script text, keeping the preview/result error-equality gates stable.
+function findSimilarLineFormat(content: string, needle: string): string | null {
+	// Strip leading whitespace and a bullet marker, then look for the same
+	// text in the file with a different leading format (indentation, numbered
+	// items like "4." vs bullets). Leading whitespace is exact in matching, so
+	// this is the most common fixable mismatch.
+	const stripped = needle.replace(/^\s+/, "").replace(/^-\s?/, "");
+	if (!stripped) return null;
+	const fileLines = content.split("\n");
+	if (fileLines.includes(needle)) return null;
+	for (const line of content.split("\n")) {
+		if (line.trim() === stripped && line !== needle) return line;
+	}
+	return null;
+}
+
 function annotateMatchError(
 	err: unknown,
 	path: string,
 	opOrdinal: number,
 	opName: string,
 	pairs: Array<{ oldLines: string[]; newLines: string[] }>,
+	content?: string,
 ): Error {
 	const base = err instanceof Error ? err : new Error(String(err));
 	if (
@@ -925,10 +1039,25 @@ function annotateMatchError(
 	if (!pair) return base;
 	const rows = pair.oldLines.slice(0, 5).map((line) => (line.length > 80 ? `${line.slice(0, 80)}…` : line));
 	const detail = rows.join(" ⏎ ");
+	// LOCAL (0.1.1): when a row exists in the file with a different leading
+	// format (indentation or numbered-item vs bullet), name it so the model
+	// copies the exact format instead of guessing.
+	let formatNote = "";
+	if (content !== undefined && err.kind === "notFound") {
+		for (const line of pair.oldLines) {
+			const similar = findSimilarLineFormat(content, line);
+			if (similar !== null) {
+				formatNote = `\nNote: the file has a similar line with different leading format: ${JSON.stringify(
+					similar,
+				)} — copy its exact leading whitespace and markers (numbered items like "4." vs bullets).`;
+				break;
+			}
+		}
+	}
 	return new Error(
 		`${base.message}\nFailed ${opName} op ${opOrdinal}, block ${err.editIndex + 1}/${pairs.length}: "${detail}"${
 			detail.length > 400 ? "…" : ""
-		}\nTip: the diff-style separator (one leading space after a marker) is already tried automatically; the row still differs from the file — re-read and compare whitespace/punctuation.`,
+		}${formatNote}\nTip: the diff-style separator (one leading space after a marker) is already tried automatically; the row still differs from the file — re-read and compare whitespace/punctuation.`,
 	);
 }
 
@@ -956,11 +1085,11 @@ function applyReplaceOperation(content: string, path: string, op: Extract<RawRow
 			lastError = err;
 			const isNotFound = err instanceof EditMatchError && err.kind === "notFound";
 			if (!isNotFound || edits === attempts[attempts.length - 1]) {
-				throw annotateMatchError(err, path, opOrdinal, "@REPLACE", pairs);
+				throw annotateMatchError(err, path, opOrdinal, "@REPLACE", pairs, content);
 			}
 		}
 	}
-	throw annotateMatchError(lastError, path, opOrdinal, "@REPLACE", pairs);
+	throw annotateMatchError(lastError, path, opOrdinal, "@REPLACE", pairs, content);
 }
 
 // LOCAL (0.1.1): opOrdinal threaded for block-level error attribution.
@@ -1002,13 +1131,13 @@ function applyAnchorInsertOperation(
 			if (!isNotFound || anchor === anchors[anchors.length - 1]) {
 				throw annotateMatchError(err, path, opOrdinal, opName, [
 					{ oldLines: anchorText.split("\n"), newLines: insertText.split("\n") },
-				]);
+				], content);
 			}
 		}
 	}
 	throw annotateMatchError(lastError, path, opOrdinal, opName, [
 		{ oldLines: anchorText.split("\n"), newLines: insertText.split("\n") },
-	]);
+	], content);
 }
 
 function applyRowOperations(path: string, content: string, ops: RawRowOperation[]): string {
@@ -1137,7 +1266,12 @@ function parseUpdateChunk(lines: string[], startIndex: number, lastContentLine: 
 	const first = lines[i].trimEnd();
 
 	if (first === "@@") i++;
-	else if (first.startsWith("@@ ")) {
+	else if (/^@@ -\d+(,\d+)? \+\d+(,\d+)? @@( .*)?$/.test(first)) {
+		// Standard unified-diff line-range header ("@@ -1 +1 @@") — ignore it;
+		// post-trained models write it out of habit and it must not be treated
+		// as a context anchor (the file never contains that literal text).
+		i++;
+	} else if (first.startsWith("@@ ")) {
 		changeContext = first.slice(3);
 		i++;
 	} else if (!allowMissingContext) {
@@ -1307,7 +1441,7 @@ function deriveUpdatedContent(filePath: string, currentContent: string, chunks: 
 
 async function buildPatchPlan(text: string, cwd: string): Promise<ParsedPlan> {
 	const operations = parsePatch(text);
-	const store = createSnapshotStore(cwd, (_path, absolutePath) => maybeReadNormalized(absolutePath));
+	const store = createSnapshotStore(cwd, (_path, absolutePath) => maybeReadNormalized(_path, absolutePath));
 
 	for (const op of operations) {
 		const snapshot = await store.get(op.path);
@@ -1328,15 +1462,180 @@ async function buildPatchPlan(text: string, cwd: string): Promise<ParsedPlan> {
 	return { mode: "patch", changes: store.collectChanges("The patch produced no changes.") };
 }
 
+// ============================================================================
+// Code mode — edit files with TypeScript/JavaScript instead of row scripts.
+// Payload is prefixed with ```js (or js:). Runs in a vm sandbox with only
+// readFile/readLines/writeFile/console whitelisted; an exception rolls back
+// every writeFile of the call (all-or-nothing, like the row modes).
+// ============================================================================
+
+function isCodeLikePayload(text: string): boolean {
+	const trimmed = text.trimStart();
+	if (trimmed.startsWith("js:")) return true;
+	return /^```(?:js|javascript|ts|typescript)\s*\n[\s\S]*\n```\s*$/.test(trimmed);
+}
+
+function extractCodePayload(text: string): string {
+	const trimmed = text.trimStart();
+	if (trimmed.startsWith("js:")) {
+		const code = trimmed.slice(3).trim();
+		if (!code) throw new Error("Code mode payload is empty after the js: prefix.");
+		return code;
+	}
+	const m = trimmed.match(/^```(?:js|javascript|ts|typescript)\s*\n([\s\S]*?)\n```\s*$/);
+	if (m && m[1].trim()) return m[1];
+	throw new Error("Code mode payload is empty: expected ```js ... ``` (or js: ...) with code inside.");
+}
+
+type CodeWrite = {
+	path: string;
+	absolutePath: string;
+	original: string | null; // null = file did not exist before the call
+	newContent: string;
+};
+
+function buildCodePlan(text: string, cwd: string): ParsedPlan {
+	const code = extractCodePayload(text);
+	// Syntax-only pre-check: compile without executing (no side effects).
+	try {
+		vm.compileFunction(code, [], { filename: "edit-code-mode.js" });
+	} catch (err: any) {
+		throw new Error(
+			`Code mode syntax error: ${err instanceof Error ? err.message : String(err)}\nNo changes were applied — fix the code and resubmit.`,
+		);
+	}
+	return { mode: "code", code, cwd, changes: [] };
+}
+
+function resolveCodePath(cwd: string, path: string): string {
+	if (typeof path !== "string" || path.trim() === "") throw new Error("Code mode: file path must be a non-empty string.");
+	return isAbsolute(path) ? resolvePath(path) : resolvePath(cwd, path);
+}
+
+async function executeCodePlan(plan: ParsedPlan & { mode: "code" }, signal?: AbortSignal): Promise<UnifiedEditDetails> {
+	const code = plan.code!;
+	const writes = new Map<string, CodeWrite>();
+	const logs: string[] = [];
+
+	const readFileApi = (path: string): string => {
+		const abs = resolveCodePath(plan.cwd ?? "", path);
+		const buf = readFileSync(abs);
+		if (!isUtf8(buf)) {
+			throw new Error(`Code mode: readFile("${path}") refused — the file is not valid UTF-8 (binary or misencoded files are not editable).`);
+		}
+		const { bom, text } = stripBom(readFileSync(abs, "utf-8"));
+		return bom + text;
+	};
+	const readLinesApi = (path: string): string[] => readFileApi(path).split("\n");
+	const writeFileApi = (path: string, content: string): void => {
+		if (typeof content !== "string") throw new Error(`Code mode: writeFile("${path}", ...) requires a string content, got ${typeof content}.`);
+		const abs = resolveCodePath(plan.cwd ?? "", path);
+		const existing = writes.get(abs);
+		if (existing) {
+			existing.newContent = content;
+			writeFileSync(abs, content, "utf-8");
+			return;
+		}
+		let original: string | null = null;
+		try {
+			original = readFileSync(abs, "utf-8");
+		} catch (err: any) {
+			if (err?.code !== "ENOENT") throw err;
+		}
+		writes.set(abs, { path, absolutePath: abs, original, newContent: content });
+		mkdirSync(dirname(abs), { recursive: true });
+		writeFileSync(abs, content, "utf-8");
+	};
+
+	const sandbox = {
+		readFile: readFileApi,
+		readLines: readLinesApi,
+		writeFile: writeFileApi,
+		console: {
+			log: (...args: unknown[]) => logs.push(args.map(String).join(" ")),
+			error: (...args: unknown[]) => logs.push(`error: ${args.map(String).join(" ")}`),
+		},
+	};
+	const context = vm.createContext(sandbox);
+
+	const rollback = (): void => {
+		for (const w of writes.values()) {
+			try {
+				if (w.original === null) unlinkSync(w.absolutePath);
+				else writeFileSync(w.absolutePath, w.original, "utf-8");
+			} catch {
+				// best-effort rollback; the original error is what matters
+			}
+		}
+	};
+
+	try {
+		throwIfAborted(signal);
+		vm.runInContext(code, context, { timeout: 10000, filename: "edit-code-mode.js" });
+	} catch (err: any) {
+		rollback();
+		throw new Error(
+			`Code mode failed: ${err instanceof Error ? err.message : String(err)}${
+				logs.length > 0 ? `\nconsole output:\n${logs.join("\n")}` : ""
+			}\nNo changes were applied — every writeFile of the call was rolled back.`,
+		);
+	}
+
+	const files: UnifiedEditDetails["files"] = [];
+	for (const w of writes.values()) {
+		const { diff, firstChangedLine } = generateDiffString(w.original ?? "", w.newContent);
+		files.push({
+			path: w.path,
+			kind: w.original === null ? "add" : "update",
+			details: {
+				diff,
+				patch: generateUnifiedPatch(w.path, w.original ?? "", w.newContent),
+				firstChangedLine,
+			},
+		});
+	}
+	if (files.length === 0) {
+		throw new Error("Code mode made no changes: the code did not call writeFile. Call writeFile(path, content) to apply edits.");
+	}
+	return combineDetails(files);
+}
+
 async function buildPlan(text: string, cwd: string): Promise<ParsedPlan> {
-	return isPatchLikePayload(text) ? buildPatchPlan(text, cwd) : buildRowPlan(text, cwd);
+	return buildPlanForMode(text, cwd, getEditMode());
 }
 
 async function buildPreviewPlan(text: string, cwd: string, argsComplete: boolean): Promise<ParsedPlan> {
-	if (!argsComplete && isPatchLikePayload(text) && !isPatchPayload(text)) {
+	const mode = getEditMode();
+	if (mode === "patch" && !argsComplete && isPatchLikePayload(text) && !isPatchPayload(text)) {
 		return buildPatchPlan(patchTextForPreview(text), cwd);
 	}
-	return buildPlan(text, cwd);
+	return buildPlanForMode(text, cwd, mode);
+}
+
+async function buildPlanForMode(text: string, cwd: string, mode: EditMode, argsComplete = true): Promise<ParsedPlan> {
+	if (mode === "patch") {
+		if (!isPatchLikePayload(text)) {
+			throw new Error(
+				"This edit tool is configured for patch mode (PI_UNIFIED_EDIT_MODE=patch). Start the payload with '*** Begin Patch' and end it with '*** End Patch'.",
+			);
+		}
+		return buildPatchPlan(text, cwd);
+	}
+	if (mode === "code") {
+		if (!isCodeLikePayload(text)) {
+			throw new Error(
+				"This edit tool is configured for code mode (PI_UNIFIED_EDIT_MODE=code). Start the payload with 'js:' or a ```js fence and use readFile/readLines/writeFile.",
+			);
+		}
+		return buildCodePlan(text, cwd);
+	}
+	// rows mode: reject the other dialects so the model never mixes formats
+	if (isPatchLikePayload(text) || isCodeLikePayload(text)) {
+		throw new Error(
+			"This edit tool is configured for row-script mode (PI_UNIFIED_EDIT_MODE=rows). Use [path] sections with @REPLACE/@INS.PRE/@INS.POST/@INS.BEFORE/@INS.AFTER/@APPEND/@DEL — the payload does not start with a [filename] header.",
+		);
+	}
+	return buildRowPlan(text, cwd);
 }
 
 // ============================================================================
@@ -1377,16 +1676,22 @@ function detailsForChange(path: string, oldText: string, newText: string): EditD
 	return { diff, patch: generateUnifiedPatch(path, oldText, newText), firstChangedLine };
 }
 
-async function readFileForMutation(absolutePath: string): Promise<{ bom: string; ending: "\r\n" | "\n"; content: string }> {
+async function readFileForMutation(path: string, absolutePath: string): Promise<{ bom: string; ending: "\r\n" | "\n"; content: string }> {
 	await access(absolutePath, constants.R_OK | constants.W_OK);
-	const { bom, text } = stripBom(await readFile(absolutePath, "utf-8"));
+	// LOCAL (0.1.1): strict UTF-8 read — never lossy-decode a file we are
+	// about to rewrite (invalid bytes would be silently replaced with U+FFFD).
+	const { bom, text } = stripBom(await readFileUtf8Strict(path, absolutePath));
 	return { bom, ending: detectLineEnding(text), content: normalizeToLF(text) };
 }
 
 // LOCAL (0.1.1): raw byte snapshot (BOM/CRLF faithful) for guarded rollback.
+// Non-UTF-8 files return null: this call never writes them (strict reads
+// reject them), so there is nothing to snapshot or restore.
 async function readRawBytes(absolutePath: string): Promise<string | null> {
 	try {
-		const { bom, text } = stripBom(await readFile(absolutePath, "utf-8"));
+		const buf = await readFile(absolutePath);
+		if (!isUtf8(buf)) return null;
+		const { bom, text } = stripBom(buf.toString("utf-8"));
 		return bom + text;
 	} catch {
 		return null;
@@ -1396,7 +1701,7 @@ async function readRawBytes(absolutePath: string): Promise<string | null> {
 async function applyUpdateChange(change: PlannedFileChange, signal?: AbortSignal): Promise<EditDetailsLike> {
 	return withFileMutationQueue(change.absolutePath, async () => {
 		throwIfAborted(signal);
-		const file = await readFileForMutation(change.absolutePath);
+		const file = await readFileForMutation(change.path, change.absolutePath);
 		throwIfAborted(signal);
 
 		// LOCAL (0.1.1): strict drift guard, consistent with the write/delete
@@ -1426,7 +1731,7 @@ async function applyUpdateChange(change: PlannedFileChange, signal?: AbortSignal
 async function applyWriteChange(change: PlannedFileChange, signal?: AbortSignal): Promise<EditDetailsLike> {
 	return withFileMutationQueue(change.absolutePath, async () => {
 		throwIfAborted(signal);
-		const file = await readFileForMutation(change.absolutePath);
+		const file = await readFileForMutation(change.path, change.absolutePath);
 		if (file.content !== change.oldText) {
 			throw new Error(`Could not edit ${change.path}: file changed since preflight.`);
 		}
@@ -1438,7 +1743,7 @@ async function applyWriteChange(change: PlannedFileChange, signal?: AbortSignal)
 async function applyAddChange(change: PlannedFileChange, signal?: AbortSignal): Promise<EditDetailsLike> {
 	return withFileMutationQueue(change.absolutePath, async () => {
 		throwIfAborted(signal);
-		const existing = await maybeReadNormalized(change.absolutePath);
+		const existing = await maybeReadNormalized(change.path, change.absolutePath);
 		if (existing !== null) throw new Error(`Could not add ${change.path}: file already exists.`);
 		await mkdir(dirname(change.absolutePath), { recursive: true });
 		await writeFile(change.absolutePath, change.newText, "utf-8");
@@ -1465,6 +1770,7 @@ async function applyDeleteChange(change: PlannedFileChange, signal?: AbortSignal
 // partially landed before throwing). The original error is always thrown;
 // rollback failures and skipped restores are appended, never substituted.
 async function applyPlan(plan: ParsedPlan, signal?: AbortSignal): Promise<UnifiedEditDetails> {
+	if (plan.mode === "code") return executeCodePlan(plan as ParsedPlan & { mode: "code" }, signal);
 	const appliers = {
 		update: applyUpdateChange,
 		write: applyWriteChange,
@@ -1585,6 +1891,9 @@ function formatSummary(details: UnifiedEditDetails): string {
 // ============================================================================
 
 function previewForPlan(plan: ParsedPlan): Preview {
+	if (plan.mode === "code") {
+		return { diff: `Code mode — executes on submit. Writes are atomic (an exception rolls back all writeFile calls).\n\n\`\`\`js\n${plan.code}\n\`\`\``, files: [] };
+	}
 	const details = combineDetails(
 		plan.changes.map((change) => ({
 			path: change.path,
@@ -1845,12 +2154,14 @@ function formatUnifiedEditResult(
 }
 
 export default function unifiedEditExtension(pi: ExtensionAPI) {
+	const mode = getEditMode();
+	const prompt = modePrompt(mode);
 	pi.registerTool({
 		name: "edit",
 		label: "edit",
-		description: TOOL_DESCRIPTION,
-		promptSnippet: TOOL_PROMPT_SNIPPET,
-		promptGuidelines: TOOL_PROMPT_GUIDELINES,
+		description: prompt.description,
+		promptSnippet: prompt.snippet,
+		promptGuidelines: prompt.guidelines,
 		parameters: unifiedEditSchema,
 		renderShell: "self",
 		prepareArguments: prepareUnifiedArguments,
@@ -1858,7 +2169,18 @@ export default function unifiedEditExtension(pi: ExtensionAPI) {
 		async execute(_toolCallId, params: UnifiedEditParams, signal, _onUpdate, ctx) {
 			const text = params.text;
 			if (typeof text !== "string" || text.trim() === "") throw new Error("edit requires a non-empty text payload.");
-			const plan = await buildPlan(text, ctx.cwd);
+			// LOCAL (0.1.1): plan-building failures (parse errors, unmatched
+			// rows, non-UTF-8 targets) must state explicitly that NOTHING was
+			// applied — row scripts are all-or-nothing, and models have been
+			// observed to assume earlier ops in a multi-op script still landed.
+			let plan: ParsedPlan;
+			try {
+				plan = await buildPlan(text, ctx.cwd);
+			} catch (err: any) {
+				throw new Error(
+					`${err instanceof Error ? err.message : String(err)}\nNo changes were applied — the payload is all-or-nothing: fix the failing part and resubmit the whole payload.`,
+				);
+			}
 			try {
 				await preflightPlan(plan, signal);
 			} catch (err: any) {
