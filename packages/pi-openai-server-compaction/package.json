@@ -1,0 +1,50 @@
+{
+  "name": "pi-openai-server-compaction",
+  "version": "0.1.0",
+  "description": "pi extension: default-on native OpenAI Responses server compaction (Compaction V2) for strict Codex, Fluxion-mirror, and xAI Responses allowlists with explicit opt-outs.",
+  "private": true,
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "extension",
+    "compaction",
+    "openai",
+    "responses",
+    "codex"
+  ],
+  "files": [
+    "index.ts",
+    "openai-server-compaction.ts",
+    "gpt-reasoning-replay.ts",
+    "tests",
+    "README.md",
+    "Changelog.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "pi": {
+    "extensions": [
+      "index.ts"
+    ]
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.8.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.84.1",
+    "@earendil-works/pi-coding-agent": "^0.84.1",
+    "@earendil-works/pi-tui": "^0.84.1",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}
