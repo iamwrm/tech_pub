@@ -1,66 +1,69 @@
 # pi-openai-server-compaction
 
-`pi-openai-server-compaction` is a private, path-installed pi extension that
-gives long Codex and qualified enterprise-mirror sessions **native OpenAI
-Responses server compaction** (Compaction V2) at Pi compaction boundaries,
-instead of Pi's readable local summarizer.
+Private, path-installed pi extension providing native OpenAI Responses server
+compaction (Compaction V2) at Pi manual, threshold, and overflow compaction
+boundaries through Pi's `session_before_compact` hook. It was promoted from
+`ren-public-package` `0017-openai-server-compaction` 0.10.6 into standalone
+package version 0.1.0; lifecycle ownership is
+[`IV-0003`](../../docs/IV-DC/IV-0003-openai-server-compaction.md).
 
-It was promoted out of the `ren-public-package` bundle (`0017-openai-server-compaction`,
-ren-public-package 0.10.6) into this standalone package (0.1.0). Lifecycle
-ownership: [IV-0003](../../docs/IV-DC/IV-0003-openai-server-compaction.md).
+## Qualified routes
 
-## What it does
+The feature is default-on for this exact allowlist; all other providers/models
+use Pi's ordinary compactor.
 
-- Intercepts Pi manual, threshold, and overflow boundaries through
-  `session_before_compact` for strictly allowlisted providers:
-  - **Codex** — `openai-codex`/`openai-codex-responses` via
-    `POST /backend-api/codex/responses` with a `compaction_trigger` item and
-    the named SSE lane (JWT/account headers, shared cache lane);
-  - **Fluxion mirror** — `fluxion-gpt/{gpt-5.5,gpt-5.6-sol}` and
-    `fluxion-grok/{grok-4.5,grok-4.6}` via `POST /v1/responses/compact` (unary
-    JSON, ordinary Bearer auth);
-  - **xAI** — `xai/grok-4.6` via `POST https://api.x.ai/v1/responses/compact`
-    (same standard-responses-json adapter, exact-model bound).
+| Provider/model | Native request and boundary |
+| --- | --- |
+| `openai-codex` / `openai-codex-responses` | `POST /backend-api/codex/responses`; append `compaction_trigger`, use the named SSE/cache lane and Codex JWT/account headers. |
+| `fluxion-gpt/{gpt-5.5,gpt-5.6-sol}` and `fluxion-grok/{grok-4.5,grok-4.6}` | `POST /v1/responses/compact`; unary JSON and ordinary Bearer auth. |
+| `xai/grok-4.6` | `POST https://api.x.ai/v1/responses/compact`; standard unary adapter, exact-model bound, ordinary Bearer auth. |
 
-"Compaction V2" is the strategy name (`openai-responses-compaction-v2`) for
-both wire protocols above, not a third protocol: the Codex route uses the
-Codex-subscription `compaction_trigger` + named SSE variant, while the Fluxion
-mirror and xAI routes use the standard standalone compaction contract OpenAI
-exposes at `/v1/responses/compact` (unary JSON, one opaque `cmp_…` artifact,
-canonical output replayed as-is). Grok/xAI therefore fully supports V2 through
-`/responses/compact`; it only lacks the Codex-specific trigger/SSE variant, and
-no adapter uses OpenAI's automatic `context_management`/`compact_threshold`
-in-request compaction.
-- Captures the **exact final provider payload** after Pi's complete
-  provider-request hook chain through protocol-specific stream decorators, so
-  the compaction request preserves instructions, tools, reasoning, cache keys,
-  and unknown future fields.
-- Persists the opaque server checkpoint (one encrypted artifact + bounded
-  retained user window / provider canonical output), replays it before later
-  requests, and shows a display-only transcript card with usage.
-- **Fail-open before the first opaque checkpoint** (Pi's readable compactor
-  runs), **fail-closed after it** (a failed native attempt cancels rather than
-  sending an uncorrelated summary request).
-- Bounded transient retry (≤3 attempts, abort-aware backoff), bounded
-  response/persistence sizes, strict credential redaction, and a revocable
-  operation lease per session/tree/model lifecycle.
-- `PI_OPENAI_SERVER_COMPACTION=0` (also `false`, `no`, `off`) is the emergency
-  opt-out; the feature is default-on otherwise.
+`openai-responses-compaction-v2` is one strategy name for the Codex trigger/SSE
+and standard `/responses/compact` protocols, not a third protocol. Standard
+routes return one opaque `cmp_…` artifact and their canonical output is replayed
+as-is; their checkpoints are bound to the exact provider, base URL, and model.
+No adapter uses automatic `context_management`/`compact_threshold` in-request
+compaction.
 
-## Install
+## Contract and safety
 
-From this repository root:
+- Protocol-specific stream decorators capture the exact final provider payload
+  after Pi's complete request-hook chain, preserving instructions, tools,
+  reasoning, cache keys, and unknown future fields. The extension persists one
+  encrypted opaque artifact plus bounded retained history (or the provider's
+  bounded canonical output), replays it on later requests, and adds a
+  display-only usage card. Native success is represented to Pi as
+  `[OpenAI native compaction checkpoint]`; the card warns that the opaque state
+  is not human-readable and should not be disabled or switched to another
+  provider mid-session.
+- Native creation fails open before the first opaque checkpoint: Pi's readable
+  compactor owns the boundary. After opaque ownership it fails closed: a failed
+  native attempt cancels rather than sending an uncorrelated or shim-only
+  summary request. Wrong-endpoint or malformed checkpoints likewise fail
+  closed. A revocable operation lease cancels stale or overlapping results
+  after session/tree/model changes, newer requests, or branch growth.
+- At most three byte-identical attempts are made for abort-aware transient
+  transport/truncated-stream failures, HTTP 408/500/502/503/504, or explicit
+  `server_is_overloaded`/`slow_down`. Authentication, quota/429, malformed
+  protocol, invalid artifact/cardinality, size-limit, and abort failures are
+  not retried.
+- Response and persistence sizes are bounded; credentials, account IDs,
+  request headers, complete error bodies, and opaque secrets are redacted from
+  session details. Direct compaction reconstructs only the qualified route's
+  mandatory authentication/protocol headers; standard routes never receive
+  Codex account/feature headers. `PI_OPENAI_SERVER_COMPACTION=0` (also `false`,
+  `no`, or `off`) is the emergency opt-out.
+
+## Install and development
 
 ```bash
 pi install ./packages/pi-openai-server-compaction
 ```
 
-`ren-public-package` 0.11.0 no longer bundles native compaction; install this
-package separately to keep the feature active. Persisted entry-type names keep
-the historical `ren-public-package.openai-native-compaction` prefix so existing
-session transcript cards still render.
-
-## Development
+`ren-public-package` 0.11.0 no longer bundles native compaction, so install
+this package separately. Historical entry names retain the
+`ren-public-package.openai-native-compaction` prefix so existing transcript
+cards still render.
 
 ```bash
 npm install        # dev dependencies (typecheck + tests)
@@ -68,7 +71,7 @@ npm run check      # strict tsc --noEmit
 npm test           # node:test unit + integration suites (jiti)
 ```
 
-The GPT reasoning replay projection used at the branch-tail conversion choke
-point is vendored from `ren-public-package` `0021-gpt-reasoning-replay.ts`
-(see `gpt-reasoning-replay.ts` and [IV-0008](../../docs/IV-DC/IV-0008-preserve-opaque-reasoning-across-gpt-model-switches.md));
-keep the vendored copy in sync with the authoritative 0021 module.
+The package has no runtime dependency. `gpt-reasoning-replay.ts` is a vendored
+copy of `ren-public-package` `0021-gpt-reasoning-replay.ts`, used at the
+branch-tail conversion boundary; keep it synchronized with the authoritative
+module and [IV-0008](../../docs/IV-DC/IV-0008-preserve-opaque-reasoning-across-gpt-model-switches.md).

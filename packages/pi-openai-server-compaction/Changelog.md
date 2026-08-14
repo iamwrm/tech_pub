@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Compress the README around qualified routes, failure ownership, safety, and
+  installation while retaining the complete operator contract.
 - Correct the README's relative lifecycle-document links. Runtime behavior is
   unchanged.
 
