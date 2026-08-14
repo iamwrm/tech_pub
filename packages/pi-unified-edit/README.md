@@ -1,93 +1,16 @@
 # pi-unified-edit
 
-`pi-unified-edit` is a private, path-installed pi extension that **replaces
-the built-in `edit` tool** with mitsuhiko's "Unified Edit" tool: a single
-`text` payload that accepts either a marked row edit script or a
-Codex/apply_patch-style `*** Begin Patch` payload, across multiple files, with
-add/delete/update support and live streaming previews.
-
-The implementation is a vendor copy of
+Private, path-installed pi extension that replaces the built-in `edit` tool
+with one `text` payload for multi-file, all-or-nothing edits and live previews.
+It is a vendored copy of
 [`mitsuhiko/agent-stuff/extensions/unified-edit.ts`](https://github.com/mitsuhiko/agent-stuff/blob/main/extensions/unified-edit.ts)
-(Apache-2.0), pinned at upstream commit `13bc8f87` (2026-08-10) and carrying
-local modifications since 0.1.1 — every changed site is marked
-`// LOCAL (0.1.x):` in the source, and the provenance header logs the local
-delta so a future re-vendor diff stays reviewable. It is **not installed** in
-this repo's pi settings by default — install it only when you want it:
+(Apache-2.0), pinned at upstream commit `13bc8f87` (2026-08-10) with local
+changes marked `// LOCAL (0.1.x):`. It is not installed by default.
 
-```bash
-pi install ./packages/pi-unified-edit
-```
+Lifecycle and validation: [`IV-0022`](../../docs/IV-DC/IV-0022-pi-unified-edit.md),
+[`DC-0005`](../../docs/IV-DC/DC-0005-tool-behavior-validation.md).
 
-Removing it restores the stock `edit` tool.
-
-## What it does differently from stock pi `edit`
-
-| | Stock pi `edit` | unified-edit |
-| --- | --- | --- |
-| Payload | `{path, edits:[{oldText,newText}]}` JSON | one `text` string: row script or patch |
-| Files per call | one | many (`[file]` sections / multiple patch ops) |
-| Operations | text replacement only | `@INS.PRE/POST N`, `@INS.BEFORE/AFTER`, `@REPLACE` (with unified-diff context hunks), `@APPEND`, `@DEL N-M`, plus patch `Add/Delete/Update File` |
-| New-file / delete-file | via `write` / other tools | native in patch mode |
-| Preview | only when args are complete | live preview once the payload is complete (diff appears while the tool runs and settles); no per-chunk rebuilds while streaming |
-| Compatibility | accepts legacy JSON forms | no `{path, edits}` compatibility; the model must learn the row-script dialect |
-
-It keeps pi's fuzzy edit matcher (inlined; whole-line matching added), BOM/CRLF
-preservation, the file mutation queue, all-or-nothing preflight, and
-multi-file diff/patch rendering. In the planned-file modes (rows, patch, and
-pi), every target queue is acquired before a final dry run re-reads all
-targets. Drift or an add collision therefore aborts before the first write.
-If an I/O failure still occurs during commit, guarded best-effort rollback
-restores only writes that completed successfully and whose exact bytes still
-match this call; it never guesses that the failing path belongs to this call.
-
-### Local modifications (0.1.1)
-
-- **Parser strictness**: file headers must start in column 0 (a space-prefixed
-  `[...]` row inside `@REPLACE` is a context row; it previously could silently
-  edit a wrong file); stray `@@`, bare empty `-` rows, and context rows under
-  `@INS.BEFORE`/`@INS.AFTER` are parse errors with line numbers; a space-only
-  row inside `@REPLACE` is a blank context row.
-- **Unified-diff alignment**: a single leading space after a row marker is a
-  diff-style separator. When the exact content does not match, the whole
-  `@REPLACE`/anchor op is re-read diff-style (one leading space consumed after
-  every `-`/`+`/context marker) and applied — models may write rows in either
-  the adjacent or the diff style, consistently within an op; exact content
-  always wins and uniqueness is re-checked per attempt.
-- **Diagnostics**: typed match errors annotated with op ordinal, block index
-  and bounded row content; duplicate errors name occurrence lines; update-kind
-  drift guard ("file content changed since preflight (expected N, found M)").
-- **Atomicity**: guarded best-effort mid-apply rollback (see above).
-- **Binary safety**: every file-read path (plan building, preview, apply
-  phase, rollback snapshots) now validates UTF-8 and **rejects files
-  containing invalid byte sequences** instead of lossy-decoding them — a
-  lossy read silently replaced invalid bytes with U+FFFD on write, corrupting
-  binary files even when the edit touched other lines. Valid UTF-8 (including
-  NUL bytes) is unaffected.
-- **Docs**: `TOOL_DESCRIPTION`/`TOOL_PROMPT_GUIDELINES` state the exact fuzzy
-  scope, the column-0 rule and the context-row single-space rule.
-
-### Local modifications (0.1.2)
-
-- **Preview flicker fix**: previews are built only from complete payloads
-  (`argsComplete`), matching the built-in edit tool. Rebuilding the preview
-  per streamed chunk reset the diff on every chunk and collapsed/expanded
-  the body height, so in full-screen mode every row below the tool call was
-  erased and redrawn per chunk. Streaming now renders a stable one-line
-  pending header; the diff appears once per payload when args complete.
-- **Cleanup (same change set)**: duplicated rows-mode description sentence
-  removed; dead preview-state fields and the dead partial-args preview
-  branch removed; the update preflight re-match and the apply-time matcher
-  re-run (provable no-ops after the drift guard) removed; the TUI path label
-  parses the payload fully only once args are complete (cheap header
-  extraction while streaming).
-- **Concurrency-safe dry run**: rows/patch/pi acquire all target mutation
-  queues in canonical sorted order, then re-read and validate every target
-  before writing any of them. Concurrent drift and add collisions now leave
-  every file untouched. Runtime rollback records only successfully completed
-  writes, compares exact bytes, and never restores or deletes the failing
-  path based on inference; add commits also use exclusive creation (`wx`).
-
-## Install
+## Install and fallback
 
 ```bash
 pi install ./packages/pi-unified-edit
@@ -95,44 +18,61 @@ pi install ./packages/pi-unified-edit
 pi list   # verify
 ```
 
-Remove with `pi remove pi-unified-edit`.
+Remove it with `pi remove pi-unified-edit`. If it fails to load or is removed,
+pi falls back to its stock `edit` tool.
 
-## Mode selection
+## One active dialect
 
-The extension ships four edit dialects (row script, apply-patch, code,
-pi-native JSON) and activates exactly ONE per process — the model only ever
-sees the active dialect's prompt, so it never has to choose a format:
+`PI_UNIFIED_EDIT_MODE` is read at extension registration and activates exactly
+one dialect; the model sees only that dialect's prompt. Non-active payloads are
+rejected with a hint naming the configured mode.
+
+| Mode | Payload and operations |
+| --- | --- |
+| `patch` (default) | `*** Begin Patch` / `*** End Patch`; `*** Add File`, `*** Delete File`, and `*** Update File` with `@@` context, `-` removals, `+` additions. Standard `@@ -N +M @@` line-range headers are accepted and ignored. |
+| `rows` | Column-0 `[path]` sections with `@REPLACE`, `@INS.PRE`, `@INS.POST`, `@INS.BEFORE`, `@INS.AFTER`, `@APPEND`, and `@DEL N-M`; replacement context anchors the matched block and insertions target the named line. |
+| `code` | Payloads beginning with `js:` or a JavaScript fence (&#96;&#96;&#96;js); they run in a `node:vm` sandbox exposing synchronous `readFile`, `readLines`, and `writeFile`; paths resolve from cwd and there is no delete API. |
+| `pi` | Pi-native JSON `{"path": ..., "edits": [{"oldText": ..., "newText": ...}]}` or an array for multiple files; ordered substring replacements, existing files only. |
+
+Use, for example:
 
 ```bash
-PI_UNIFIED_EDIT_MODE=patch  pi ...   # default: apply-patch (*** Begin Patch ... *** End Patch)
-PI_UNIFIED_EDIT_MODE=rows   pi ...   # row scripts ([path] + @REPLACE/@INS/@DEL/@APPEND)
-PI_UNIFIED_EDIT_MODE=code   pi ...   # js: payloads with readFile/readLines/writeFile
-PI_UNIFIED_EDIT_MODE=pi     pi ...   # pi-native JSON ({path, edits:[{oldText,newText}]})
+PI_UNIFIED_EDIT_MODE=patch  pi ...
+PI_UNIFIED_EDIT_MODE=rows   pi ...
+PI_UNIFIED_EDIT_MODE=code   pi ...
+PI_UNIFIED_EDIT_MODE=pi     pi ...
 ```
 
-Payloads in a non-active dialect are rejected with a hint naming the
-configured mode. `PI_UNIFIED_EDIT_MODE` is read at extension registration
-(process start); set it in the environment before launching pi.
+## Safety and behavior
 
-> The tool registers the name `edit`, shadowing the built-in tool. If this
-> extension fails to load or is removed, pi falls back to its built-in `edit`.
+- One call can plan multiple files. Planned-file modes acquire every target's
+  mutation queue in canonical sorted order, re-read every target, and dry-run
+  before the first write. Drift or add collisions apply nothing; update guards
+  compare the expected bytes, and add commits use exclusive `wx` creation.
+- Plan-build parse, match, or invalid-UTF-8 failures apply nothing. Every
+  binary/misencoded file is refused on every read path. Mid-apply rollback is
+  best effort and restores only confirmed successful writes whose exact bytes
+  still match this call; it never guesses at the failing path. Code mode keeps
+  only the final content when one call writes a path repeatedly; on an
+  exception it best-effort restores each original file and removes files the
+  call created. Add/delete/update patch operations and every row operation
+  share the planned transaction boundary.
+- Matching is dialect-specific. Rows and `pi` try exact content, then ignore
+  trailing whitespace and normalize common Unicode punctuation/spaces while
+  keeping leading and internal whitespace exact. Patch hunks add a
+  both-sides-trimmed stage before punctuation normalization. Whole-line
+  matching, BOM/CRLF, and valid UTF-8 including NUL bytes are preserved. Rows
+  also accept a single diff-style separator space after `-`, `+`, or context
+  markers, while exact content wins. Row headers must start in column 0;
+  indented `[path]` text is therefore context, not a new file section.
+- Errors identify the file/hunk/block where possible and say that no changes
+  were applied for plan failures; unmatched rows include bounded context and
+  whitespace guidance. The tool renders a stable pending header while
+  arguments stream and builds the diff once the payload is complete.
+- The registered name is `edit` and shadows stock pi `edit`; there is no legacy
+  `{path, edits}` compatibility except the explicit `pi` dialect.
 
-## Verification
-
-`npm run check` — strict typecheck against the pi 0.84.1 public API
-(`generateDiffString`, `generateUnifiedPatch`, `renderDiff`,
-`withFileMutationQueue` from `@earendil-works/pi-coding-agent`; `Box`,
-`Container`, `getCapabilities`, `hyperlink`, `Spacer`, `Text`, `Component`
-from `@earendil-works/pi-tui` — all confirmed exported by pi 0.84.1).
-
-`npm test` — 78 headless tests driving the registered tool definition:
-row-script replace/insert/append/delete, patch add/update/delete, multi-file
-scripts, `prepareArguments` string normalization, plus the 0.1.1 regression
-suite (parser strictness incl. the silent-wrong-file regression, matching
-semantics locks incl. the diff-style separator matrix, diagnostics, chmod-0555
-rollback, abort atomicity, and queued concurrent update/add races).
-
-## Development
+## Verification and maintenance
 
 Validated target: pi 0.84.1, Node.js >= 22.8.0.
 
@@ -144,7 +84,14 @@ npm test
 npm pack --dry-run
 ```
 
-Upstream drift check: re-fetch the source file at the pinned commit
-(`13bc8f87`) and diff against `unified-edit.ts`, ignoring `// LOCAL`-marked
-regions; when adopting upstream changes, bump the version and add a Changelog
-entry.
+`npm test` currently drives 78 headless cases covering all four dialects,
+atomicity, parser/matching diagnostics, binary rejection, abort/rollback, and
+queued concurrent update/add races. The E-series behavior methodology is
+statistical: use `PI_UNIFIED_EDIT_MODE=<mode> ./run_all.sh <provider> <model> <tag>`
+from the gitignored `local_data/edit-ab/` pack, and compare retries/first-try
+rates rather than completion alone. Prompt or dialect changes require the
+[DC-0004](../../docs/IV-DC/DC-0004-meta-prompt.md) fresh-agent gate.
+
+For upstream drift, re-fetch the pinned `13bc8f87` source and diff it against
+`unified-edit.ts`, ignoring `// LOCAL` regions; bump the version and add a
+Changelog entry when adopting upstream changes.

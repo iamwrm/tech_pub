@@ -3,6 +3,8 @@
 
 ## [Unreleased]
 
+- **README compression.** Consolidated installation, dialect, safety, and
+  validation guidance without changing runtime behavior.
 - **Lock metadata cleanup.** Synchronized the package-lock root metadata with
   the current package version 0.1.1; dependencies and runtime behavior are
   unchanged.
