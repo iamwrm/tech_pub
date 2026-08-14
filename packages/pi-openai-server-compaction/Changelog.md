@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Correct the README's relative lifecycle-document links. Runtime behavior is
+  unchanged.
+
 ## [0.1.0] - 2026-08-13
 
 - Initial release: `0017-openai-server-compaction` promoted out of

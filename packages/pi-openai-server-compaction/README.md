@@ -7,7 +7,7 @@ instead of Pi's readable local summarizer.
 
 It was promoted out of the `ren-public-package` bundle (`0017-openai-server-compaction`,
 ren-public-package 0.10.6) into this standalone package (0.1.0). Lifecycle
-ownership: [IV-0003](../docs/IV-DC/IV-0003-openai-server-compaction.md).
+ownership: [IV-0003](../../docs/IV-DC/IV-0003-openai-server-compaction.md).
 
 ## What it does
 
@@ -70,5 +70,5 @@ npm test           # node:test unit + integration suites (jiti)
 
 The GPT reasoning replay projection used at the branch-tail conversion choke
 point is vendored from `ren-public-package` `0021-gpt-reasoning-replay.ts`
-(see `gpt-reasoning-replay.ts` and [IV-0008](../docs/IV-DC/IV-0008-preserve-opaque-reasoning-across-gpt-model-switches.md));
+(see `gpt-reasoning-replay.ts` and [IV-0008](../../docs/IV-DC/IV-0008-preserve-opaque-reasoning-across-gpt-model-switches.md));
 keep the vendored copy in sync with the authoritative 0021 module.
