@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.2] - 2026-08-14
+
+- Compress the README while preserving the operator contract; runtime behavior
+  is unchanged.
+
 ## [0.1.1] - 2026-08-14
 
 - Replace the stale link to the retired Prime Agent source package with an

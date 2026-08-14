@@ -1,6 +1,6 @@
 {
   "name": "pi-prompt-magazine",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "pi extension: multi-slot prompt stash queue ('magazine'). End a draft with ;; to stash it instead of sending; live queue widget above the prompt bar + /magazine browser (restore / peek / delete / reorder / clear).",
   "private": true,
   "type": "module",

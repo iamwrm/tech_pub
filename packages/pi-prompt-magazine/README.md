@@ -1,79 +1,74 @@
 # pi-prompt-magazine
 
-pi extension that turns the single-slot prompt stash into a **queue of stashed drafts** — a "magazine" (弹匣). Type a long draft, decide you don't want to send it, and stash it with two semicolons. Load several drafts, then browse the queue and restore any one of them into the prompt editor.
-
-This is the pi port of the retired Prime Agent `pa-prompt-magazine` package:
-the same commands, capture marker, and op-log persistence, fitted to the pi
-extension API.
-
-## Why
-
-The built-in Ctrl+S stash holds exactly **one** draft: a second Ctrl+S is refused with "Prompt stash already has a draft". This extension adds an ordered queue with a visible queue-level UI, captured at the moment you decide not to send.
+Pi extension that turns the single-slot prompt stash into a FIFO queue of
+stashed drafts. End a draft with `;;` instead of sending it, then browse and
+restore any queued draft. It is the pi 0.84.1 port of the retired Prime Agent
+package, retaining its commands, capture marker, and op-log format.
 
 ## Install
 
 ```bash
 pi install ./packages/pi-prompt-magazine   # from this repo
-# or
 pi install /absolute/path/to/pi-prompt-magazine
 ```
 
-Then start a new session (or `/reload`). Remove with `pi remove pi-prompt-magazine`.
+Start a new session (or `/reload`). Remove with:
 
-## Capturing a draft: end it with `;;`
-
-Type your draft (multi-line is fine) and end the **last line with `;;`**, then press Enter. The whole draft is intercepted and pushed into the magazine instead of being sent:
-
+```bash
+pi remove pi-prompt-magazine
 ```
+
+## Capture with `;;`
+
+Type a multi-line draft and end the last line with `;;`, then press Enter:
+
+```text
 fix the typo in README
 add tests for PR #42
-;;            ← last line (or append ;; to the last line)
+;;
 ```
 
-- The `;;` marker must be at the very end of the draft (trailing whitespace is tolerated).
-- A `;;` in the middle of a multi-line draft does nothing.
-- A bare `;;` (nothing else) is ignored — safe to press Enter.
-- To *send* a draft that really ends in `;;`, end with `;;;` instead (one semicolon is stripped).
-- Only interactive submissions are intercepted; RPC/script/extension-injected inputs always pass through.
-- The marker is a constant in `magazine.ts` (`STASH_MARKER`) if you want a different one.
+The marker must be at the end (trailing whitespace is tolerated). A marker in
+the middle of a draft does nothing; bare `;;` is ignored. To send literal
+trailing `;;`, use `;;;` (one semicolon is stripped). Only interactive
+submissions are intercepted; RPC, script, and extension-injected inputs pass
+through. The marker constant is `STASH_MARKER` in `magazine.ts`. A captured
+draft is removed from the editor and the queue size is notified.
 
-After a stash the editor is empty (same as the built-in Ctrl+S), and a notification reports the queue size.
+## Commands and UI
 
-## Managing the queue
+| Command | Action |
+| --- | --- |
+| `/magazine <n>` | Pop draft N into the editor (`/magazine 1` is the front). |
+| `/magazine` | Browse, restore, peek, delete, reorder, or clear the queue. |
+| `/magazine-clear` | Clear all after confirmation. |
+| `/stash <text>` | Programmatic/script entry point. |
 
-| Action | How |
-|--------|-----|
-| Pop the Nth draft into the editor | `/magazine <n>` (e.g. `/magazine 1` for the front, `/magazine 2` for the second) |
-| Browse / restore / peek / delete / reorder / clear | `/magazine` (no argument) |
-| Clear everything | `/magazine-clear` (asks for confirmation) |
-| Stash from a script/RPC | `/stash <text>` (programmatic entry point) |
+The browser lists `▸ #1 <preview>` through `#N <preview>` and offers **Restore
+to editor**, Peek full text, Move up, Move down, Delete, Back, and Clear all.
+Pops replace the current editor content. After restoring, append `;;` and
+submit to put the draft back at the queue's end.
 
-`/magazine` without an argument lists the queue (`▸ #1 <preview>` … `#N <preview>`, front entry marked `▸`); selecting an entry opens its actions: **Restore to editor** (pops it out of the queue and puts the full text into the prompt editor), Peek full text, Move up, Move down, Delete, ← Back, plus a Clear all entry. All pops replace the current editor content.
+A non-empty widget above the prompt bar shows the count and one preview per
+stash, up to 8 rows (`… N more` beyond that), refreshing after every change.
 
-**Closed loop:** after restoring, if you decide not to send it, append `;;` and submit — it goes back onto the queue (at the back).
+## Behavior and persistence
 
-## Queue widget
+- Stashes append to the back; restore pops the selected item. Capacity is 50;
+  pushing past it drops the oldest draft and reports the drop.
+- State is per-session and follows restart, `/resume`, and session-tree
+  navigation through custom `pi.appendEntry` entries (`customType:
+  "pi-prompt-magazine"`). These entries do not reach the LLM or token
+  accounting, and sessions are independent.
+- Mutations use compact `add`/`remove`/`move`/`clear` op records, with a snapshot
+  anchor every 25 mutations; legacy full-snapshot payloads still load. For
+  realistic long-lived queues this grows the session file about 10x slower than
+  full-snapshot persistence.
+- Stashes are text-only: pasted images are not preserved because the extension
+  cannot access the built-in editor paste snapshots. Pi's Ctrl+S stash remains a
+  separate single-slot stash; a second stash is refused.
 
-When the magazine is non-empty, a widget above the prompt bar shows the count and one preview row per stash:
-
-```
-Magazine: 3 stashed
-▸ #1  fix the typo in README
- · #2  review PR #42
- · #3  draft plan for auth module
-```
-
-Up to 8 rows are shown (`… N more` beyond that). The widget refreshes on every change.
-
-## Behavior
-
-- **FIFO**: stashes append to the back; restore pops the selected draft. Reorder with "Move up"/"Move down".
-- **Capacity**: up to 50 drafts. Pushing past the cap drops the oldest draft and says so.
-- **Per-session, persistent**: state is stored as custom session entries (`pi.appendEntry`) — survives restart, `/resume`, and follows the session tree branch. Different sessions have independent magazines.
-- **Storage-efficient op log**: each mutation persists a compact op record (`add` / `remove` / `move` / `clear`) instead of a full queue snapshot, with a snapshot anchor every 25 mutations. Realistic long-lived queues grow the session file ~10x slower than full-snapshot persistence; legacy full-snapshot payloads still load.
-- **Text-only**: pasted images are not preserved (the extension API cannot reach the editor's paste snapshots that the built-in stash uses). The built-in Ctrl+S stash remains available and is separate from the magazine.
-
-## Development
+## Development and versioning
 
 ```bash
 cd packages/pi-prompt-magazine
@@ -82,16 +77,6 @@ npm run check      # strict typecheck
 npm test           # typecheck + pure-model unit tests
 ```
 
-Layout:
-
-- `index.ts` — extension entry: `;;` capture interception, commands, widget, persistence
-- `magazine.ts` — pure FIFO queue model + stash-marker parsing (no pi imports; unit-tested)
-- `tests/magazine.test.ts` — model + marker-parsing unit tests
-
-## Files / versioning
-
-Per repo conventions: bump `version` in `package.json` and add a dated entry to `Changelog.md` for each change.
-
-## License
+Each change bumps the package version and adds a dated `Changelog.md` entry.
 
 MIT
