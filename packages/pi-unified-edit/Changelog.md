@@ -1,6 +1,51 @@
 # Changelog
 
 
+## [Unreleased]
+
+- **Lock metadata cleanup.** Synchronized the package-lock root metadata with
+  the current package version 0.1.1; dependencies and runtime behavior are
+  unchanged.
+- **Concurrency-safe transaction dry run (rows/patch/pi).** The former
+  rollback snapshotted targets before entering their individual mutation
+  queues. If another queued writer changed or created a target while this
+  call waited, preflight correctly failed but failing-path rollback could
+  then revert that writer's update or delete its new file. The tool now
+  acquires every target queue in canonical sorted order, re-reads and
+  validates every target while all queues are held, and only then starts
+  committing. Drift and add collisions abort with zero writes. Runtime
+  rollback tracks only filesystem calls that completed successfully, uses
+  exact byte-state comparisons, and never guesses at the failing path; add
+  commits use exclusive creation (`wx`) as a final collision guard. Added
+  deterministic queued-update and queued-add race regressions (78 tests).
+- **Preview flicker fix (full-screen mode).** The live preview was rebuilt
+  while the tool payload was still streaming: every streamed chunk changed
+  the args key, which reset the preview, then the async rebuild landed and
+  re-expanded the diff body — the height oscillation collapsed/expanded the
+  component per chunk and rewrote every row below the tool call on each
+  change (erased with `\x1b[2K` + redrawn), flickering in full-screen
+  (alt-screen) mode. Previews are now built only from complete payloads
+  (`argsComplete`), like the built-in edit tool: the call renders a stable
+  one-line pending header while streaming, and exactly one build+invalidate
+  happens per payload once the args are complete. Removed the per-chunk
+  partial-args preview state (`previewBuiltFromCompleteArgs`,
+  `previewPendingArgsKey`, `previewSuppressedArgsKey`). Behavior otherwise
+  unchanged: the diff still appears live while the tool runs and settles.
+- **Review-driven cleanup (same change set).** Duplicated first sentence in
+  the rows-mode `TOOL_DESCRIPTION` removed (it was injected verbatim into
+  every rows-mode prompt). Dead render state (`UnifiedRenderState.planKey`,
+  `preview`, `pending`) and the dead partial-args preview branch
+  (`buildPreviewPlan`/`patchTextForPreview` special case) removed; the
+  preview now calls `buildPlan` directly. The update preflight re-match and
+  the apply-time matcher re-run in `applyUpdateChange` were provable no-ops
+  (update changes always carry non-empty `oldText` ≠ `newText`, and the
+  drift guard already guarantees `file.content === change.oldText`, so the
+  matcher output is exactly `change.newText`) — both removed. While args
+  stream, the TUI path label now uses only the cheap header extractors
+  instead of a full row-script/patch parse per render frame; the full parse
+  runs once args are complete. Schema description updated for the pi mode;
+  README test count corrected (44 → 76).
+
 ## [0.1.1] - 2026-08-12
 
 - **Pi mode (`PI_UNIFIED_EDIT_MODE=pi`).** Fourth dialect: pi's native JSON

@@ -1,4 +1,4 @@
-import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { withFileMutationQueue, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import assert from "node:assert/strict";
 import {
 	chmodSync,
@@ -59,6 +59,23 @@ async function runEditError(cwd: string, text: string, mode: TestMode = "patch")
 
 function tempDir(): string {
 	return mkdtempSync(join(tmpdir(), "pi-unified-edit-reg-"));
+}
+
+async function holdMutationQueue(path: string): Promise<{ release: () => void; done: Promise<void> }> {
+	let enter!: () => void;
+	let release!: () => void;
+	const entered = new Promise<void>((resolve) => {
+		enter = resolve;
+	});
+	const released = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const done = withFileMutationQueue(path, async () => {
+		enter();
+		await released;
+	});
+	await entered;
+	return { release, done };
 }
 
 // ============================================================================
@@ -454,6 +471,68 @@ test("D2: abort before any mutation leaves files untouched and reports 0 applied
 			/Operation aborted/,
 		);
 		assert.equal(readFileSync(f, "utf8"), "x\n");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("D3: queued concurrent update is preserved and the whole dry run aborts before writes", async () => {
+	const root = tempDir();
+	try {
+		const first = join(root, "a-first.txt");
+		const raced = join(root, "z-raced.txt");
+		writeFileSync(first, "first-old\n");
+		writeFileSync(raced, "raced-old\n");
+
+		const held = await holdMutationQueue(raced);
+		let rejected!: Promise<void>;
+		try {
+			const applying = __test.applyPlan({
+				mode: "rows",
+				changes: [
+					{ kind: "update", path: "a-first.txt", absolutePath: first, oldText: "first-old\n", newText: "first-new\n" },
+					{ kind: "update", path: "z-raced.txt", absolutePath: raced, oldText: "raced-old\n", newText: "ours\n" },
+				],
+			} as any);
+			rejected = assert.rejects(applying, /Preflight failed before mutating files[\s\S]*file content changed/);
+
+			// Let applyPlan enqueue behind the held target queue. This update belongs
+			// to the queue holder and must become the dry run's observed state.
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			writeFileSync(raced, "concurrent\n");
+		} finally {
+			held.release();
+		}
+		await Promise.all([held.done, rejected]);
+
+		assert.equal(readFileSync(first, "utf8"), "first-old\n", "no earlier target may be written");
+		assert.equal(readFileSync(raced, "utf8"), "concurrent\n", "the concurrent update must not be rolled back");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("D4: queued concurrent add collision is preserved", async () => {
+	const root = tempDir();
+	try {
+		const target = join(root, "new.txt");
+		const held = await holdMutationQueue(target);
+		let rejected!: Promise<void>;
+		try {
+			const applying = __test.applyPlan({
+				mode: "patch",
+				changes: [{ kind: "add", path: "new.txt", absolutePath: target, oldText: "", newText: "ours\n" }],
+			} as any);
+			rejected = assert.rejects(applying, /Preflight failed before mutating files[\s\S]*file already exists/);
+
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			writeFileSync(target, "concurrent\n");
+		} finally {
+			held.release();
+		}
+		await Promise.all([held.done, rejected]);
+
+		assert.equal(readFileSync(target, "utf8"), "concurrent\n", "the colliding file must not be deleted");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

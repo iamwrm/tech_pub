@@ -6,11 +6,11 @@
  * vendoring): 274fe04 initial "experimental" tool, 4b00c54 rendering alignment,
  * c77d497 context rows + @@ hunks + empty-fuzzy-needle hang fix.
  * License: Apache-2.0 (see LICENSE). Vendored with local modifications (marked
- * "// LOCAL (0.1.1):" at each changed site): column-0 file headers, parse-time
+ * "// LOCAL (0.1.x):" at each changed site): column-0 file headers, parse-time
  * rejection of bare "-" rows / stray "@@" / context rows under anchor ops, typed
  * match errors with block-level diagnostics, update drift guard, guarded
- * best-effort mid-apply rollback, doc alignment. Re-vendor by diffing against the
- * pinned commit and keeping the LOCAL markers.
+ * transaction-wide queued dry run, confirmed-write rollback, doc alignment.
+ * Re-vendor by diffing against the pinned commit and keeping the LOCAL markers.
  */
 
 /**
@@ -33,7 +33,7 @@ import {
 import { Box, Container, getCapabilities, hyperlink, Spacer, Text, type Component } from "@earendil-works/pi-tui";
 import { constants, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { isUtf8 } from "node:buffer";
-import { access, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, realpath, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, resolve as resolvePath } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -53,7 +53,6 @@ function getEditMode(): EditMode {
 }
 
 const ROWS_DESCRIPTION = `Edit files with one marked row edit script. Multiple [path] sections per call; all-or-nothing.
-Edit files with one marked row edit script. Multiple [path] sections per call; all-or-nothing.
 
 Format:
 [path]
@@ -193,7 +192,7 @@ const unifiedEditSchema = {
 	properties: {
 		text: {
 			type: "string",
-			description: "The edit payload in the tool's configured dialect (row script, apply-patch, or js: code).",
+			description: "The edit payload in the tool's configured dialect (row script, apply-patch, js: code, or pi-native JSON).",
 		},
 	},
 } as any;
@@ -285,20 +284,19 @@ type RenderContext<TState> = {
 
 type Preview = { diff: string; files: string[]; firstChangedLine?: number } | { error: string };
 
+// LOCAL (0.1.2): preview state is keyed only to the complete-args payload.
+// While args stream, no preview exists, so the call renders a stable one-line
+// header; rebuilding partial payloads reset the diff on every chunk and
+// collapsed/expanded the body height, erasing and redrawing every row below
+// the tool call in full-screen (alt-screen) mode — visible flicker.
 type UnifiedEditCallRenderComponent = Box & {
 	preview?: Preview;
 	previewArgsKey?: string;
-	previewBuiltFromCompleteArgs?: boolean;
 	previewPending?: boolean;
-	previewPendingArgsKey?: string;
-	previewSuppressedArgsKey?: string;
 	settledError?: boolean;
 };
 
 type UnifiedRenderState = {
-	planKey?: string;
-	preview?: Preview;
-	pending?: boolean;
 	callComponent?: UnifiedEditCallRenderComponent;
 };
 
@@ -1674,15 +1672,7 @@ async function buildPlan(text: string, cwd: string): Promise<ParsedPlan> {
 	return buildPlanForMode(text, cwd, getEditMode());
 }
 
-async function buildPreviewPlan(text: string, cwd: string, argsComplete: boolean): Promise<ParsedPlan> {
-	const mode = getEditMode();
-	if (mode === "patch" && !argsComplete && isPatchLikePayload(text) && !isPatchPayload(text)) {
-		return buildPatchPlan(patchTextForPreview(text), cwd);
-	}
-	return buildPlanForMode(text, cwd, mode);
-}
-
-async function buildPlanForMode(text: string, cwd: string, mode: EditMode, argsComplete = true): Promise<ParsedPlan> {
+async function buildPlanForMode(text: string, cwd: string, mode: EditMode): Promise<ParsedPlan> {
 	if (mode === "patch") {
 		if (!isPatchLikePayload(text)) {
 			throw new Error(
@@ -1735,215 +1725,226 @@ async function checkCanCreatePath(absolutePath: string): Promise<void> {
 	}
 }
 
-async function preflightPlan(plan: ParsedPlan, signal?: AbortSignal): Promise<void> {
-	for (const change of plan.changes) {
-		throwIfAborted(signal);
-		if (change.kind === "add") {
-			await checkCanCreatePath(change.absolutePath);
-			continue;
-		}
-		if (change.kind === "update") {
-			applyEditsToNormalizedContent(change.oldText, [{ oldText: change.oldText, newText: change.newText }], change.path);
-		}
-		await access(change.absolutePath, constants.R_OK | constants.W_OK);
-	}
-}
-
 function detailsForChange(path: string, oldText: string, newText: string): EditDetailsLike {
 	const { diff, firstChangedLine } = generateDiffString(oldText, newText);
 	return { diff, patch: generateUnifiedPatch(path, oldText, newText), firstChangedLine };
 }
 
-async function readFileForMutation(path: string, absolutePath: string): Promise<{ bom: string; ending: "\r\n" | "\n"; content: string }> {
-	await access(absolutePath, constants.R_OK | constants.W_OK);
-	// LOCAL (0.1.1): strict UTF-8 read — never lossy-decode a file we are
-	// about to rewrite (invalid bytes would be silently replaced with U+FFFD).
-	const { bom, text } = stripBom(await readFileUtf8Strict(path, absolutePath));
-	return { bom, ending: detectLineEnding(text), content: normalizeToLF(text) };
+type RawFileState = { kind: "missing" } | { kind: "file"; bytes: Buffer };
+
+type MutationFile = {
+	rawBytes: Buffer;
+	bom: string;
+	ending: "\r\n" | "\n";
+	content: string;
+};
+
+type PreparedFileChange = {
+	change: PlannedFileChange;
+	before: RawFileState;
+	written: RawFileState;
+	details: EditDetailsLike;
+	output?: string;
+};
+
+function isMissingPathError(error: unknown): boolean {
+	return (
+		typeof error === "object" &&
+		error !== null &&
+		"code" in error &&
+		(error.code === "ENOENT" || error.code === "ENOTDIR")
+	);
 }
 
-// LOCAL (0.1.1): raw byte snapshot (BOM/CRLF faithful) for guarded rollback.
-// Non-UTF-8 files return null: this call never writes them (strict reads
-// reject them), so there is nothing to snapshot or restore.
-async function readRawBytes(absolutePath: string): Promise<string | null> {
+async function readRawFileState(absolutePath: string): Promise<RawFileState> {
 	try {
-		const buf = await readFile(absolutePath);
-		if (!isUtf8(buf)) return null;
-		const { bom, text } = stripBom(buf.toString("utf-8"));
-		return bom + text;
-	} catch {
-		return null;
+		return { kind: "file", bytes: await readFile(absolutePath) };
+	} catch (error) {
+		if (isMissingPathError(error)) return { kind: "missing" };
+		throw error;
 	}
 }
 
-async function applyUpdateChange(change: PlannedFileChange, signal?: AbortSignal): Promise<EditDetailsLike> {
-	return withFileMutationQueue(change.absolutePath, async () => {
-		throwIfAborted(signal);
-		const file = await readFileForMutation(change.path, change.absolutePath);
-		throwIfAborted(signal);
+function rawFileStatesEqual(a: RawFileState, b: RawFileState): boolean {
+	if (a.kind !== b.kind) return false;
+	return a.kind === "missing" || (b.kind === "file" && a.bytes.equals(b.bytes));
+}
 
-		// LOCAL (0.1.1): strict drift guard, consistent with the write/delete
-		// kinds. Without it a concurrently modified file surfaced as a raw
-		// matcher error whose phantom whole-file oldText never appeared in the
-		// message, and a retry could silently double-apply.
-		if (file.content !== change.oldText) {
+async function readFileForMutation(path: string, absolutePath: string): Promise<MutationFile> {
+	await access(absolutePath, constants.R_OK | constants.W_OK);
+	// LOCAL (0.1.1): strict UTF-8 read — never lossy-decode a file we are
+	// about to rewrite (invalid bytes would be silently replaced with U+FFFD).
+	const rawBytes = await readFile(absolutePath);
+	if (!isUtf8(rawBytes)) throw new NotUtf8Error(path);
+	const { bom, text } = stripBom(rawBytes.toString("utf-8"));
+	return { rawBytes, bom, ending: detectLineEnding(text), content: normalizeToLF(text) };
+}
+
+// LOCAL (0.1.2): acquire every target queue in one stable order before the
+// final dry run. This makes the dry-run snapshots and the mutations one
+// transaction with respect to pi's cooperating edit/write tools. Canonical
+// keys avoid self-deadlock when two path spellings resolve to the same file;
+// sorting avoids lock-order deadlocks between overlapping multi-file edits.
+async function mutationQueueKey(absolutePath: string): Promise<string> {
+	const resolved = resolvePath(absolutePath);
+	try {
+		return await realpath(resolved);
+	} catch (error) {
+		if (isMissingPathError(error)) return resolved;
+		throw error;
+	}
+}
+
+async function withMutationQueues<T>(absolutePaths: string[], operation: () => Promise<T>): Promise<T> {
+	const keys = [...new Set(await Promise.all(absolutePaths.map(mutationQueueKey)))].sort();
+	const acquire = (index: number): Promise<T> => {
+		if (index === keys.length) return operation();
+		return withFileMutationQueue(keys[index], () => acquire(index + 1));
+	};
+	return acquire(0);
+}
+
+async function prepareFileChange(change: PlannedFileChange, signal?: AbortSignal): Promise<PreparedFileChange> {
+	throwIfAborted(signal);
+	if (change.kind === "add") {
+		await checkCanCreatePath(change.absolutePath);
+		const before = await readRawFileState(change.absolutePath);
+		throwIfAborted(signal);
+		if (before.kind === "file") throw new Error(`Could not add ${change.path}: file already exists.`);
+		return {
+			change,
+			before,
+			written: { kind: "file", bytes: Buffer.from(change.newText, "utf-8") },
+			details: detailsForChange(change.path, "", change.newText),
+			output: change.newText,
+		};
+	}
+
+	const file = await readFileForMutation(change.path, change.absolutePath);
+	throwIfAborted(signal);
+	if (file.content !== change.oldText) {
+		if (change.kind === "update") {
 			throw new Error(
 				`Could not edit ${change.path}: file content changed since preflight (expected ${change.oldText.length} chars, found ${file.content.length} chars). Re-read the file and retry.`,
 			);
 		}
+		const verb = change.kind === "delete" ? "delete" : "edit";
+		throw new Error(`Could not ${verb} ${change.path}: file changed since preflight.`);
+	}
 
-		const { baseContent, newContent } = applyEditsToNormalizedContent(
-			file.content,
-			[{ oldText: change.oldText, newText: change.newText }],
-			change.path,
-		);
+	const before: RawFileState = { kind: "file", bytes: file.rawBytes };
+	if (change.kind === "delete") {
+		return {
+			change,
+			before,
+			written: { kind: "missing" },
+			details: detailsForChange(change.path, change.oldText, ""),
+		};
+	}
 
-		// LOCAL (0.1.1): abort check moved before the write — an abort must never
-		// surface as an error for a file that was fully written.
-		throwIfAborted(signal);
-		await writeFile(change.absolutePath, file.bom + restoreLineEndings(newContent, file.ending), "utf-8");
-		return detailsForChange(change.path, baseContent, newContent);
-	});
+	const output = file.bom + restoreLineEndings(change.newText, file.ending);
+	return {
+		change,
+		before,
+		written: { kind: "file", bytes: Buffer.from(output, "utf-8") },
+		details: detailsForChange(change.path, file.content, change.newText),
+		output,
+	};
 }
 
-async function applyWriteChange(change: PlannedFileChange, signal?: AbortSignal): Promise<EditDetailsLike> {
-	return withFileMutationQueue(change.absolutePath, async () => {
-		throwIfAborted(signal);
-		const file = await readFileForMutation(change.path, change.absolutePath);
-		if (file.content !== change.oldText) {
-			throw new Error(`Could not edit ${change.path}: file changed since preflight.`);
-		}
-		await writeFile(change.absolutePath, file.bom + restoreLineEndings(change.newText, file.ending), "utf-8");
-		return detailsForChange(change.path, file.content, change.newText);
-	});
-}
-
-async function applyAddChange(change: PlannedFileChange, signal?: AbortSignal): Promise<EditDetailsLike> {
-	return withFileMutationQueue(change.absolutePath, async () => {
-		throwIfAborted(signal);
-		const existing = await maybeReadNormalized(change.path, change.absolutePath);
-		if (existing !== null) throw new Error(`Could not add ${change.path}: file already exists.`);
-		await mkdir(dirname(change.absolutePath), { recursive: true });
-		await writeFile(change.absolutePath, change.newText, "utf-8");
-		return detailsForChange(change.path, "", change.newText);
-	});
-}
-
-async function applyDeleteChange(change: PlannedFileChange, signal?: AbortSignal): Promise<EditDetailsLike> {
-	return withFileMutationQueue(change.absolutePath, async () => {
-		throwIfAborted(signal);
-		await access(change.absolutePath, constants.R_OK | constants.W_OK);
-		const current = await readExistingNormalized(change.path, change.absolutePath);
-		if (current !== change.oldText) throw new Error(`Could not delete ${change.path}: file changed since preflight.`);
+async function commitPreparedChange(prepared: PreparedFileChange, signal?: AbortSignal): Promise<void> {
+	const { change, output } = prepared;
+	throwIfAborted(signal);
+	if (change.kind === "delete") {
 		await unlink(change.absolutePath);
-		return detailsForChange(change.path, change.oldText, "");
+		return;
+	}
+	if (change.kind === "add") {
+		await mkdir(dirname(change.absolutePath), { recursive: true });
+		throwIfAborted(signal);
+		// The final exclusive-create guard also protects against non-cooperating
+		// writers racing the dry run; a collision fails without truncating them.
+		await writeFile(change.absolutePath, output!, { encoding: "utf-8", flag: "wx" });
+		return;
+	}
+	await writeFile(change.absolutePath, output!, "utf-8");
+}
+
+async function applyUpdateChange(change: PlannedFileChange, signal?: AbortSignal): Promise<EditDetailsLike> {
+	return withMutationQueues([change.absolutePath], async () => {
+		const prepared = await prepareFileChange(change, signal);
+		await commitPreparedChange(prepared, signal);
+		return prepared.details;
 	});
 }
 
-// LOCAL (0.1.1): guarded best-effort rollback. Raw bytes (BOM/CRLF faithful)
-// of every target are snapshotted before mutating. On mid-apply failure,
-// exactly the paths this call already wrote are restored — and only when their
-// current bytes still equal what this call wrote (never blind-overwrite a
-// concurrent editor). The failing path itself is included (a write may have
-// partially landed before throwing). The original error is always thrown;
-// rollback failures and skipped restores are appended, never substituted.
+// LOCAL (0.1.2): transaction-wide dry run. All target queues remain held from
+// the final re-read through commit and rollback. Every target is validated and
+// snapshotted before the first mutation, so drift/add collisions abort with
+// zero writes. A runtime failure rolls back only commits whose filesystem call
+// resolved successfully; the failing path is never guessed at or blindly
+// restored. Exact Buffer comparisons keep rollback BOM/line-ending/binary
+// faithful and avoid overwriting a non-cooperating concurrent writer.
 async function applyPlan(plan: ParsedPlan, signal?: AbortSignal): Promise<UnifiedEditDetails> {
 	if (plan.mode === "code") return executeCodePlan(plan as ParsedPlan & { mode: "code" }, signal);
-	const appliers = {
-		update: applyUpdateChange,
-		write: applyWriteChange,
-		add: applyAddChange,
-		delete: applyDeleteChange,
-	} as const;
+	return withMutationQueues(
+		plan.changes.map((change) => change.absolutePath),
+		async () => {
+			const prepared: PreparedFileChange[] = [];
+			try {
+				for (const change of plan.changes) prepared.push(await prepareFileChange(change, signal));
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				throw new Error(`Preflight failed before mutating files.\n${message}`);
+			}
 
-	const rawBefore = new Map<string, string>();
-	for (const change of plan.changes) {
-		const bytes = await readRawBytes(change.absolutePath);
-		if (bytes !== null) rawBefore.set(change.absolutePath, bytes);
-	}
-
-	const applied: Array<{ absolutePath: string; writtenBytes: string | null }> = [];
-	const files: UnifiedEditDetails["files"] = [];
-	let failingChange: PlannedFileChange | undefined;
-
-	try {
-		for (const change of plan.changes) {
-			throwIfAborted(signal);
-			failingChange = change;
-			const details = await appliers[change.kind](change, signal);
-			failingChange = undefined;
-			files.push({ path: change.path, kind: change.kind, details });
-			applied.push({
-				absolutePath: change.absolutePath,
-				writtenBytes: change.kind === "delete" ? null : await readRawBytes(change.absolutePath),
-			});
-		}
-	} catch (err) {
-		const rollbackErrors: string[] = [];
-
-		// Restore a path this call wrote: re-create deleted files, remove
-		// add-kind files, or write back the original bytes — but only when the
-		// current bytes still match what we wrote (or, for the failing path, when
-		// they differ from the pre-call snapshot, meaning our write landed).
-		const restoreWritten = async (absolutePath: string, writtenBytes: string | null): Promise<void> => {
-			const original = rawBefore.get(absolutePath);
-			const current = await readRawBytes(absolutePath);
-			if (writtenBytes === null) {
-				if (original !== undefined && current === null) {
-					await mkdir(dirname(absolutePath), { recursive: true });
-					await writeFile(absolutePath, original, "utf-8");
+			const applied: PreparedFileChange[] = [];
+			const files: UnifiedEditDetails["files"] = [];
+			try {
+				for (const entry of prepared) {
+					await commitPreparedChange(entry, signal);
+					applied.push(entry);
+					files.push({ path: entry.change.path, kind: entry.change.kind, details: entry.details });
 				}
-				return;
-			}
-			if (current === null) return;
-			if (current === writtenBytes) {
-				if (original !== undefined) await writeFile(absolutePath, original, "utf-8");
-				else await unlink(absolutePath);
-				return;
-			}
-			rollbackErrors.push(`skipped restore of ${absolutePath}: content changed after this edit`);
-		};
-		const restoreFailingPath = async (absolutePath: string): Promise<void> => {
-			const original = rawBefore.get(absolutePath);
-			const current = await readRawBytes(absolutePath);
-			if (original === undefined) {
-				if (current !== null) await unlink(absolutePath);
-				return;
-			}
-			if (current !== null && current !== original) await writeFile(absolutePath, original, "utf-8");
-		};
+			} catch (error) {
+				const rollbackErrors: string[] = [];
+				for (const entry of [...applied].reverse()) {
+					try {
+						const current = await readRawFileState(entry.change.absolutePath);
+						if (rawFileStatesEqual(current, entry.before)) continue;
+						if (!rawFileStatesEqual(current, entry.written)) {
+							rollbackErrors.push(`skipped restore of ${entry.change.absolutePath}: content changed after this edit`);
+							continue;
+						}
+						if (entry.before.kind === "file") {
+							await mkdir(dirname(entry.change.absolutePath), { recursive: true });
+							await writeFile(entry.change.absolutePath, entry.before.bytes);
+						} else if (current.kind === "file") {
+							await unlink(entry.change.absolutePath);
+						}
+					} catch (rollbackError) {
+						rollbackErrors.push(
+							`rollback failed for ${entry.change.absolutePath}: ${
+								rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
+							}`,
+						);
+					}
+				}
 
-		for (const entry of [...applied].reverse()) {
-			try {
-				await withFileMutationQueue(entry.absolutePath, () => restoreWritten(entry.absolutePath, entry.writtenBytes));
-			} catch (rbErr) {
-				rollbackErrors.push(
-					`rollback failed for ${entry.absolutePath}: ${rbErr instanceof Error ? rbErr.message : String(rbErr)}`,
-				);
+				const message = error instanceof Error ? error.message : String(error);
+				const appliedPaths = applied.map((entry) => entry.change.absolutePath).join(", ");
+				const suffix = [
+					`Applied ${applied.length} of ${plan.changes.length} change(s) before failure${
+						applied.length > 0 ? `: ${appliedPaths}` : ""
+					}; rolled back confirmed changes on a best-effort basis.`,
+					...rollbackErrors,
+				].join("\n");
+				throw new Error(`${message}\n${suffix}`);
 			}
-		}
-		if (failingChange) {
-			try {
-				await withFileMutationQueue(failingChange.absolutePath, () => restoreFailingPath(failingChange!.absolutePath));
-			} catch (rbErr) {
-				rollbackErrors.push(
-					`rollback failed for ${failingChange.absolutePath}: ${rbErr instanceof Error ? rbErr.message : String(rbErr)}`,
-				);
-			}
-		}
 
-		const message = err instanceof Error ? err.message : String(err);
-		const appliedPaths = applied.map((entry) => entry.absolutePath).join(", ");
-		const suffix = [
-			`Applied ${applied.length} of ${plan.changes.length} change(s) before failure${
-				applied.length > 0 ? `: ${appliedPaths}` : ""
-			}; rolled back on a best-effort basis.`,
-			...rollbackErrors,
-		].join("\n");
-		throw new Error(`${message}\n${suffix}`);
-	}
-
-	return combineDetails(files);
+			return combineDetails(files);
+		},
+	);
 }
 
 function combineDetails(files: UnifiedEditDetails["files"]): UnifiedEditDetails {
@@ -2066,10 +2067,15 @@ function extractPatchHeaderPaths(text: string): string[] {
 	return uniquePaths(paths);
 }
 
-function getRenderablePaths(text: string | undefined): string[] | undefined {
+// LOCAL (0.1.2): while the payload is still streaming only the cheap header
+// extractors run — the full row-script/patch parse would otherwise re-run on
+// every render frame, growing with the payload. The full parse matters only
+// once the args are complete (the preview's files list replaces it anyway).
+function getRenderablePaths(text: string | undefined, argsComplete: boolean): string[] | undefined {
 	if (!text) return undefined;
 	const patchLike = isPatchLikePayload(text);
 	const fallback = patchLike ? extractPatchHeaderPaths(text) : extractRowHeaderPaths(text);
+	if (!argsComplete) return fallback.length > 0 ? fallback : undefined;
 	try {
 		const paths = patchLike
 			? parsePatch(isPatchPayload(text) ? text : patchTextForPreview(text)).map((op) => op.path)
@@ -2088,9 +2094,9 @@ function renderUnifiedPathLabel(paths: string[] | undefined, theme: any, cwd: st
 	return theme.fg("accent", `${unique.length} files`);
 }
 
-function formatUnifiedEditCall(text: string | undefined, preview: Preview | undefined, theme: any, cwd: string): string {
+function formatUnifiedEditCall(text: string | undefined, preview: Preview | undefined, theme: any, cwd: string, argsComplete: boolean): string {
 	const title = theme.fg("toolTitle", theme.bold("edit"));
-	const paths = preview && !("error" in preview) ? preview.files : getRenderablePaths(text);
+	const paths = preview && !("error" in preview) ? preview.files : getRenderablePaths(text, argsComplete);
 	return `${title} ${renderUnifiedPathLabel(paths, theme, cwd)}`;
 }
 
@@ -2098,10 +2104,7 @@ function createUnifiedEditCallRenderComponent(): UnifiedEditCallRenderComponent 
 	return Object.assign(new Box(1, 1, (text: string) => text), {
 		preview: undefined as Preview | undefined,
 		previewArgsKey: undefined as string | undefined,
-		previewBuiltFromCompleteArgs: false,
 		previewPending: false,
-		previewPendingArgsKey: undefined as string | undefined,
-		previewSuppressedArgsKey: undefined as string | undefined,
 		settledError: false,
 	});
 }
@@ -2138,7 +2141,6 @@ function setUnifiedEditPreview(
 	component: UnifiedEditCallRenderComponent,
 	preview: Preview,
 	argsKey: string | undefined,
-	argsComplete = true,
 ): boolean {
 	const current = component.preview;
 	const changed =
@@ -2153,10 +2155,7 @@ function setUnifiedEditPreview(
 				current.files.join("\0") !== preview.files.join("\0")));
 	component.preview = preview;
 	component.previewArgsKey = argsKey;
-	component.previewBuiltFromCompleteArgs = argsComplete;
 	component.previewPending = false;
-	component.previewPendingArgsKey = undefined;
-	component.previewSuppressedArgsKey = undefined;
 	return changed;
 }
 
@@ -2168,28 +2167,25 @@ function requestUnifiedEditPreview(
 	argsComplete: boolean,
 	invalidate: () => void,
 ): void {
-	const hasUsablePreview = component.preview && (!argsComplete || component.previewBuiltFromCompleteArgs);
-	if (!text || !argsKey || hasUsablePreview || component.previewPendingArgsKey === argsKey) return;
-	if (!argsComplete && component.previewSuppressedArgsKey === argsKey) return;
+	// LOCAL (0.1.2): previews are built only from complete payloads. While the
+	// model is still streaming the payload every chunk changed the args key,
+	// which reset the preview, then the async rebuild landed and re-expanded
+	// the diff body; the resulting height oscillation rewrote every row below
+	// the tool call on every chunk (flicker in full-screen mode). The built-in
+	// edit gates on argsComplete too — once the payload is complete, the key is
+	// stable and exactly one build+invalidate happens per payload.
+	if (!argsComplete) return;
+	if (!text || !argsKey || component.preview !== undefined || component.previewPending) return;
 
 	component.previewPending = true;
-	component.previewPendingArgsKey = argsKey;
 	const requestKey = argsKey;
-	void buildPreviewPlan(text, cwd, argsComplete)
+	void buildPlan(text, cwd)
 		.then((plan): Preview => previewForPlan(plan))
-		.catch((err): Preview | undefined => {
-			if (!argsComplete) return undefined;
-			return { error: err instanceof Error ? err.message : String(err) };
-		})
+		.catch((err): Preview => ({ error: err instanceof Error ? err.message : String(err) }))
 		.then((preview) => {
 			if (component.previewArgsKey !== requestKey) return;
 			component.previewPending = false;
-			component.previewPendingArgsKey = undefined;
-			if (preview) {
-				setUnifiedEditPreview(component, preview, requestKey, argsComplete);
-			} else {
-				component.previewSuppressedArgsKey = requestKey;
-			}
+			setUnifiedEditPreview(component, preview, requestKey);
 			invalidate();
 		});
 }
@@ -2199,10 +2195,11 @@ function buildUnifiedEditCallComponent(
 	text: string | undefined,
 	theme: any,
 	cwd: string,
+	argsComplete: boolean,
 ): UnifiedEditCallRenderComponent {
 	component.setBgFn(getUnifiedEditHeaderBg(component.preview, component.settledError, theme));
 	component.clear();
-	component.addChild(new Text(formatUnifiedEditCall(text, component.preview, theme, cwd), 0, 0));
+	component.addChild(new Text(formatUnifiedEditCall(text, component.preview, theme, cwd, argsComplete), 0, 0));
 
 	if (!component.preview) return component;
 
@@ -2259,11 +2256,6 @@ export default function unifiedEditExtension(pi: ExtensionAPI) {
 					`${err instanceof Error ? err.message : String(err)}\nNo changes were applied — the payload is all-or-nothing: fix the failing part and resubmit the whole payload.`,
 				);
 			}
-			try {
-				await preflightPlan(plan, signal);
-			} catch (err: any) {
-				throw new Error(`Preflight failed before mutating files.\n${err?.message ?? String(err)}`);
-			}
 			const details = await applyPlan(plan, signal);
 			return { content: [{ type: "text" as const, text: formatSummary(details) }], details };
 		},
@@ -2276,16 +2268,13 @@ export default function unifiedEditExtension(pi: ExtensionAPI) {
 			if (component.previewArgsKey !== key) {
 				component.preview = undefined;
 				component.previewArgsKey = key;
-				component.previewBuiltFromCompleteArgs = false;
 				component.previewPending = false;
-				component.previewPendingArgsKey = undefined;
-				component.previewSuppressedArgsKey = undefined;
 				component.settledError = false;
 			}
 
 			requestUnifiedEditPreview(component, text, key, context.cwd, context.argsComplete, () => context.invalidate());
 
-			return buildUnifiedEditCallComponent(component, text, theme, context.cwd);
+			return buildUnifiedEditCallComponent(component, text, theme, context.cwd, context.argsComplete);
 		},
 
 		renderResult(result, _options, theme, context: RenderContext<UnifiedRenderState>) {
@@ -2313,7 +2302,7 @@ export default function unifiedEditExtension(pi: ExtensionAPI) {
 					component.settledError = context.isError;
 					changed = true;
 				}
-				if (changed) buildUnifiedEditCallComponent(component, text, theme, context.cwd);
+				if (changed) buildUnifiedEditCallComponent(component, text, theme, context.cwd, context.argsComplete);
 			}
 
 			const output = formatUnifiedEditResult(component?.preview, typed, theme, context.isError);
