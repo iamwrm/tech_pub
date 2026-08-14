@@ -2,7 +2,9 @@
 
 pi extension that turns the single-slot prompt stash into a **queue of stashed drafts** — a "magazine" (弹匣). Type a long draft, decide you don't want to send it, and stash it with two semicolons. Load several drafts, then browse the queue and restore any one of them into the prompt editor.
 
-This is the pi port of the Prime Agent [`pa-prompt-magazine`](../../packages/pa-prompt-magazine/README.md) package: the same commands, capture marker, and op-log persistence, fitted to the pi extension API.
+This is the pi port of the retired Prime Agent `pa-prompt-magazine` package:
+the same commands, capture marker, and op-log persistence, fitted to the pi
+extension API.
 
 ## Why
 

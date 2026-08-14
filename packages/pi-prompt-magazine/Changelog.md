@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.1] - 2026-08-14
+
+- Replace the stale link to the retired Prime Agent source package with an
+  accurate historical provenance note. Runtime behavior is unchanged.
+
 ## [0.1.0] - 2026-08-11
 
 - Initial `/magazine` pi extension, ported from the Prime Agent
