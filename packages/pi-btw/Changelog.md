@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Correct the package description and README to describe 0.2.0 accurately as
+  no-tool by default with explicit `/tools` opt-in.
+- Synchronize the lockfile root version with package version 0.2.0.
+
 ## [0.2.0] - 2026-08-11
 
 - Add `/tools` (and `/tools off`) to toggle the full core tool set on the live

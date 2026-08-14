@@ -1,10 +1,11 @@
 # pi-btw
 
 `pi-btw` is a private, path-installed pi extension that adds a multi-turn,
-background, **no-tool** side branch and can materialize that branch as a
-normal resumable session. It is the pi port of the Prime Agent
-[`pa-btw2`](../../packages/pa-btw2/README.md) package: the same `/btw2`
-command surface and semantics, fitted to the pi 0.84.1 extension API.
+background side branch that is **no-tool by default**, can opt into all core
+tools with `/tools`, and can materialize that branch as a normal resumable
+session. It is the pi port of the retired Prime Agent `pa-btw2` package: the
+same `/btw2` command surface and semantics, fitted to the pi 0.84.1 extension
+API.
 
 It intentionally differs from pi's built-in capabilities: BTW2 freezes the
 parent branch once, preserves the selected model, thinking level, and
@@ -155,8 +156,9 @@ regular context).
 - “Private side branch” means absent from the **parent session file**, not local
   or private from the configured provider. The frozen system prompt and prior
   conversation—including tool/file output or secrets already present—are sent
-  to that provider. No-tools prevents new tool execution; it does not prevent
-  data transmission.
+  to that provider. While tools remain off, no new tool execution occurs; this
+  does not prevent data transmission. Enabling `/tools` permits real workspace
+  side effects.
 - Provider billing/quota applies. A discarded side run leaves no accounting or
   audit entry in the parent JSONL.
 - Memory is currently unbounded: there is no TTL, turn cap, or separate token
