@@ -3,11 +3,41 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-15
+
+- **Hash mode (`PI_UNIFIED_EDIT_MODE=hash`, `hashline` alias).** Added a
+  Node-native implementation of the explicit-line core of oh-my-pi's
+  hashline format. Successful stock `read` results become `[path#TAG]` plus
+  `N:text`; `edit` accepts original-snapshot `PUT N.=M`, `PUT <N`/`>N`/`>$`,
+  `CUT N.=M`, `REM`, and `MV`, including multi-file payloads. Tags use the
+  OMP-compatible normalized XXH32 low 16 bits, but validation also requires
+  an exact session-issued snapshot and read-seen line anchors. Stale tags,
+  unseen lines, overlapping ranges, binary files, and unsupported `N*`/
+  register syntax fail closed. Hash plans reuse the transaction-wide queues,
+  dry run, drift guards, exclusive adds, CRLF/BOM preservation, and rollback
+  of the other planned-file modes. OMP attribution and intentional syntax
+  differences are recorded in `THIRD_PARTY_NOTICES.md`.
+- **Hash regression coverage.** Added 13 deterministic tests for official
+  XXH32 vectors, read transformation and offsets, original-coordinate
+  operations, multi-file atomicity, stale/unseen/overlap rejection, BOM/CRLF,
+  move, binary refusal, unsupported blocks, aliasing, and exact snapshot
+  identity. Total suite: 91 tests.
+- **Five-mode fresh-session evidence.** E1-E24 × rows/patch/code/pi/hash ×
+  ds/sol/luna/opus (all `max` thinking) completed 480 retained runs (three
+  provider-error attempts were rerun). Hash tied patch at 92/96 final-state
+  passes and had the lowest mean wall time (23.2s), p95 (48.3s), and total
+  token usage (8.810M); versus
+  patch that is -10.1% mean wall, -35.6% p95, and -11.1% tokens, while median
+  wall was +9.6%. Rows had the highest pass rate (95/96). Raw artifacts live
+  in gitignored `local_data/edit-ab/results/five-20260815`; durable details
+  are in IV-0022.
+- **Validated pi target.** Development types and documentation now target pi
+  0.84.2.
+
 - **README compression.** Consolidated installation, dialect, safety, and
   validation guidance without changing runtime behavior.
 - **Lock metadata cleanup.** Synchronized the package-lock root metadata with
-  the current package version 0.1.1; dependencies and runtime behavior are
-  unchanged.
+  package version 0.2.0 and pi 0.84.2 development dependencies.
 - **Concurrency-safe transaction dry run (rows/patch/pi).** The former
   rollback snapshotted targets before entering their individual mutation
   queues. If another queued writer changed or created a target while this
@@ -38,7 +68,7 @@
   every rows-mode prompt). Dead render state (`UnifiedRenderState.planKey`,
   `preview`, `pending`) and the dead partial-args preview branch
   (`buildPreviewPlan`/`patchTextForPreview` special case) removed; the
-  preview now calls `buildPlan` directly. The update preflight re-match and
+  preview now calls the selected mode's plan builder directly. The update preflight re-match and
   the apply-time matcher re-run in `applyUpdateChange` were provable no-ops
   (update changes always carry non-empty `oldText` ≠ `newText`, and the
   drift guard already guarantees `file.content === change.oldText`, so the

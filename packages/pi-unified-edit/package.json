@@ -1,7 +1,7 @@
 {
   "name": "pi-unified-edit",
-  "version": "0.1.1",
-  "description": "pi extension: vendored copy of mitsuhiko/agent-stuff unified-edit.ts — a drop-in replacement for the built-in edit tool accepting marked row scripts and Codex-style apply_patch payloads across multiple files.",
+  "version": "0.2.0",
+  "description": "Atomic multi-file pi edit extension with patch, rows, code, pi-JSON, and OMP-compatible hash-line modes.",
   "private": true,
   "type": "module",
   "keywords": [
@@ -9,14 +9,18 @@
     "pi",
     "extension",
     "edit",
-    "patch"
+    "patch",
+    "hashline"
   ],
   "files": [
     "unified-edit.ts",
+    "hash-edit.ts",
     "tests",
+    "scripts/*.py",
     "README.md",
     "Changelog.md",
-    "LICENSE"
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "scripts": {
     "check": "tsc --noEmit",
@@ -32,8 +36,8 @@
     "node": ">=22.8.0"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.84.1",
-    "@earendil-works/pi-tui": "^0.84.1",
+    "@earendil-works/pi-coding-agent": "^0.84.2",
+    "@earendil-works/pi-tui": "^0.84.2",
     "@types/node": "^24.0.0",
     "tsx": "latest",
     "typescript": "latest"

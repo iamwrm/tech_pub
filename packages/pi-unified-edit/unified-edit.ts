@@ -6,7 +6,7 @@
  * vendoring): 274fe04 initial "experimental" tool, 4b00c54 rendering alignment,
  * c77d497 context rows + @@ hunks + empty-fuzzy-needle hang fix.
  * License: Apache-2.0 (see LICENSE). Vendored with local modifications (marked
- * "// LOCAL (0.1.x):" at each changed site): column-0 file headers, parse-time
+ * "// LOCAL (...):" at each changed site): column-0 file headers, parse-time
  * rejection of bare "-" rows / stray "@@" / context rows under anchor ops, typed
  * match errors with block-level diagnostics, update drift guard, guarded
  * transaction-wide queued dry run, confirmed-write rollback, doc alignment.
@@ -16,8 +16,9 @@
 /**
  * Unified Edit Extension — replaces the built-in `edit` tool.
  *
- * The tool accepts one text payload.  The payload is either a row-oriented edit
- * script or a Codex/apply_patch-style patch.  Diff rendering uses pi's exported
+ * The tool accepts one text payload in the process-selected dialect: rows,
+ * Codex/apply-patch, sandboxed code, pi JSON, or OMP-compatible hash lines.
+ * Diff rendering uses pi's exported
  * generateDiffString/generateUnifiedPatch; the fuzzy edit matcher core is
  * inlined from pi's internal edit-diff implementation because it is not part of
  * pi's public API (and this copy adds whole-line matching on top).
@@ -38,17 +39,26 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, resolve as resolvePath } from "node:path";
 import { pathToFileURL } from "node:url";
 import vm from "node:vm";
+import {
+	HashSnapshotStore,
+	buildHashChanges,
+	formatHashReadResult,
+	parseHashPayload,
+	recordAppliedHashChanges,
+} from "./hash-edit.ts";
 
-// LOCAL (0.1.1): the extension ships four edit modes (row script, apply-patch,
-// code, pi-native JSON) and exactly ONE is active per process, selected by
-// PI_UNIFIED_EDIT_MODE (rows | patch | code | pi, default patch). The model
+// LOCAL (0.2.0): the extension ships five edit modes (row script, apply-patch,
+// code, pi-native JSON, OMP-compatible hash lines) and exactly ONE is active
+// per process, selected by PI_UNIFIED_EDIT_MODE
+// (rows | patch | code | pi | hash, default patch). The model
 // only ever sees the active mode's prompt and payload dialect — no format
 // choice, so no ambiguity.
-type EditMode = "rows" | "patch" | "code" | "pi";
+type EditMode = "rows" | "patch" | "code" | "pi" | "hash";
 
 function getEditMode(): EditMode {
 	const mode = process.env.PI_UNIFIED_EDIT_MODE?.trim().toLowerCase();
-	if (mode === "rows" || mode === "code" || mode === "pi") return mode;
+	if (mode === "rows" || mode === "code" || mode === "pi" || mode === "hash") return mode;
+	if (mode === "hashline") return "hash";
 	return "patch";
 }
 
@@ -178,10 +188,48 @@ const PI_GUIDELINES = [
 	"One payload can edit several files (array form); the tool never creates files and refuses non-UTF-8/binary files.",
 ];
 
+const HASH_DESCRIPTION = `Edit existing UTF-8 files with OMP-compatible hash lines. In hash mode, read returns a snapshot header followed by numbered rows:
+[src/main.ts#A1B2]
+1:const old = 1;
+2:run();
+
+Copy the exact [path#TAG] header into edit. Every line number refers to that original tagged snapshot, even when one payload has several operations.
+
+Format:
+[src/main.ts#A1B2]
+PUT 1.=1:
++const value = 2;
+PUT <2:
++setup();
+CUT 8.=10
+
+Operations:
+PUT N.=M:   replace original lines N..M with the following + rows
+PUT <N:     insert + rows before original line N
+PUT >N:     insert + rows after original line N
+PUT >$:     append + rows at EOF
+CUT N.=M    delete original lines N..M
+REM          delete the file (must be the section's only operation)
+MV path      move the edited file to a new, nonexistent path
+
+Use multiple [path#TAG] sections for an all-or-nothing multi-file edit. PUT needs one or more + rows; '+' inserts a blank row. Explicit line ranges are supported; OMP's syntax-aware N* blocks and named registers are intentionally not supported. Use write for a new file.`;
+
+const HASH_SNIPPET =
+	"Edit files with hash-anchored line operations: read [path#TAG] + N:text, then PUT/CUT/REM/MV against original line numbers.";
+
+const HASH_GUIDELINES = [
+	"Read every target first and copy its exact [path#TAG] header. Only lines shown by read may be replaced/deleted/anchored; use offset/limit for a large file.",
+	"All PUT/CUT line numbers refer to the original tagged snapshot, not to results of earlier operations in the payload.",
+	"Use PUT N.=M with + replacement rows, PUT <N or >N for insertion, PUT >$ for append, and CUT N.=M for deletion. Do not use N* blocks or registers.",
+	"Prefer one payload with several [path#TAG] sections. One stale tag, unseen line, overlap, invalid range, or binary file rejects the entire payload with no changes.",
+	"Hash edit changes existing files. Use REM to delete, MV to move to a nonexistent destination, and the write tool to create a new file.",
+];
+
 function modePrompt(mode: EditMode): { description: string; snippet: string; guidelines: string[] } {
 	if (mode === "patch") return { description: PATCH_DESCRIPTION, snippet: PATCH_SNIPPET, guidelines: PATCH_GUIDELINES };
 	if (mode === "code") return { description: CODE_DESCRIPTION, snippet: CODE_SNIPPET, guidelines: CODE_GUIDELINES };
 	if (mode === "pi") return { description: PI_DESCRIPTION, snippet: PI_SNIPPET, guidelines: PI_GUIDELINES };
+	if (mode === "hash") return { description: HASH_DESCRIPTION, snippet: HASH_SNIPPET, guidelines: HASH_GUIDELINES };
 	return { description: ROWS_DESCRIPTION, snippet: ROWS_SNIPPET, guidelines: ROWS_GUIDELINES };
 }
 
@@ -192,7 +240,7 @@ const unifiedEditSchema = {
 	properties: {
 		text: {
 			type: "string",
-			description: "The edit payload in the tool's configured dialect (row script, apply-patch, js: code, or pi-native JSON).",
+			description: "The edit payload in the tool's configured dialect (row script, apply-patch, js: code, pi-native JSON, or hash lines).",
 		},
 	},
 } as any;
@@ -228,7 +276,7 @@ type PlannedFileChange = {
 };
 
 type ParsedPlan = {
-	mode: "rows" | "patch" | "code" | "pi";
+	mode: "rows" | "patch" | "code" | "pi" | "hash";
 	code?: string;
 	cwd?: string;
 	changes: PlannedFileChange[];
@@ -1275,6 +1323,10 @@ function isPatchLikePayload(text: string): boolean {
 	return normalizeToLF(text).trimStart().startsWith("*** Begin Patch");
 }
 
+function isHashLikePayload(text: string): boolean {
+	return /^\s*\[[^\n\]]+#[0-9A-Fa-f]{4}\]\s*(?:\n|$)/.test(normalizeToLF(text));
+}
+
 function patchTextForPreview(text: string): string {
 	const normalized = normalizeToLF(text).trimEnd();
 	return normalized.endsWith("*** End Patch") ? normalized : `${normalized}\n*** End Patch`;
@@ -1668,11 +1720,12 @@ async function executeCodePlan(plan: ParsedPlan & { mode: "code" }, signal?: Abo
 	return combineDetails(files);
 }
 
-async function buildPlan(text: string, cwd: string): Promise<ParsedPlan> {
-	return buildPlanForMode(text, cwd, getEditMode());
-}
-
-async function buildPlanForMode(text: string, cwd: string, mode: EditMode): Promise<ParsedPlan> {
+async function buildPlanForMode(
+	text: string,
+	cwd: string,
+	mode: EditMode,
+	hashStore?: HashSnapshotStore,
+): Promise<ParsedPlan> {
 	if (mode === "patch") {
 		if (!isPatchLikePayload(text)) {
 			throw new Error(
@@ -1697,8 +1750,18 @@ async function buildPlanForMode(text: string, cwd: string, mode: EditMode): Prom
 		}
 		return buildCodePlan(text, cwd);
 	}
+	if (mode === "hash") {
+		if (!isHashLikePayload(text)) {
+			throw new Error(
+				"This edit tool is configured for hash mode (PI_UNIFIED_EDIT_MODE=hash). Read the target, then start each section with its exact [path#TAG] header and use PUT/CUT/REM/MV.",
+			);
+		}
+		if (!hashStore) throw new Error("Hash mode snapshot store is unavailable; reload the extension and read the target again.");
+		const changes = await buildHashChanges(text, cwd, hashStore);
+		return { mode: "hash", changes };
+	}
 	// rows mode: reject the other dialects so the model never mixes formats
-	if (isPatchLikePayload(text) || isCodeLikePayload(text) || isPiLikePayload(text)) {
+	if (isPatchLikePayload(text) || isCodeLikePayload(text) || isPiLikePayload(text) || isHashLikePayload(text)) {
 		throw new Error(
 			"This edit tool is configured for row-script mode (PI_UNIFIED_EDIT_MODE=rows). Use [path] sections with @REPLACE/@INS.PRE/@INS.POST/@INS.BEFORE/@INS.AFTER/@APPEND/@DEL — the payload does not start with a [filename] header.",
 		);
@@ -2067,6 +2130,18 @@ function extractPatchHeaderPaths(text: string): string[] {
 	return uniquePaths(paths);
 }
 
+function extractHashHeaderPaths(text: string): string[] {
+	const paths: string[] = [];
+	for (const raw of normalizeToLF(text).split("\n")) {
+		if (!raw.startsWith("[")) continue;
+		const complete = /^\[(.+)#[0-9A-Fa-f]{4}\]\s*$/.exec(raw);
+		const partial = /^\[([^\]#]+)(?:#[0-9A-Fa-f]{0,4})?$/.exec(raw);
+		const path = safeRenderablePath(complete?.[1] ?? partial?.[1] ?? "");
+		if (path) paths.push(path);
+	}
+	return uniquePaths(paths);
+}
+
 // LOCAL (0.1.2): while the payload is still streaming only the cheap header
 // extractors run — the full row-script/patch parse would otherwise re-run on
 // every render frame, growing with the payload. The full parse matters only
@@ -2074,12 +2149,19 @@ function extractPatchHeaderPaths(text: string): string[] {
 function getRenderablePaths(text: string | undefined, argsComplete: boolean): string[] | undefined {
 	if (!text) return undefined;
 	const patchLike = isPatchLikePayload(text);
-	const fallback = patchLike ? extractPatchHeaderPaths(text) : extractRowHeaderPaths(text);
+	const hashLike = getEditMode() === "hash" || isHashLikePayload(text);
+	const fallback = patchLike
+		? extractPatchHeaderPaths(text)
+		: hashLike
+			? extractHashHeaderPaths(text)
+			: extractRowHeaderPaths(text);
 	if (!argsComplete) return fallback.length > 0 ? fallback : undefined;
 	try {
 		const paths = patchLike
 			? parsePatch(isPatchPayload(text) ? text : patchTextForPreview(text)).map((op) => op.path)
-			: parseRowScript(text).map((script) => script.path);
+			: hashLike
+				? parseHashPayload(text).map((section) => section.path)
+				: parseRowScript(text).map((script) => script.path);
 		const unique = uniquePaths(paths);
 		return unique.length > 0 ? unique : fallback.length > 0 ? fallback : undefined;
 	} catch {
@@ -2166,6 +2248,8 @@ function requestUnifiedEditPreview(
 	cwd: string,
 	argsComplete: boolean,
 	invalidate: () => void,
+	hashStore?: HashSnapshotStore,
+	mode: EditMode = getEditMode(),
 ): void {
 	// LOCAL (0.1.2): previews are built only from complete payloads. While the
 	// model is still streaming the payload every chunk changed the args key,
@@ -2179,7 +2263,7 @@ function requestUnifiedEditPreview(
 
 	component.previewPending = true;
 	const requestKey = argsKey;
-	void buildPlan(text, cwd)
+	void buildPlanForMode(text, cwd, mode, hashStore)
 		.then((plan): Preview => previewForPlan(plan))
 		.catch((err): Preview => ({ error: err instanceof Error ? err.message : String(err) }))
 		.then((preview) => {
@@ -2231,6 +2315,13 @@ function formatUnifiedEditResult(
 export default function unifiedEditExtension(pi: ExtensionAPI) {
 	const mode = getEditMode();
 	const prompt = modePrompt(mode);
+	const hashStore = mode === "hash" ? new HashSnapshotStore() : undefined;
+	if (hashStore) {
+		// LOCAL (0.2.0): hash edits need the tagged, numbered snapshot emitted by
+		// OMP's read tool. Preserve pi's native read implementation/renderers and
+		// transform only its successful model-facing result.
+		pi.on("tool_result", async (event, ctx) => formatHashReadResult(event, ctx.cwd, hashStore));
+	}
 	pi.registerTool({
 		name: "edit",
 		label: "edit",
@@ -2250,14 +2341,19 @@ export default function unifiedEditExtension(pi: ExtensionAPI) {
 			// observed to assume earlier ops in a multi-op script still landed.
 			let plan: ParsedPlan;
 			try {
-				plan = await buildPlan(text, ctx.cwd);
+				plan = await buildPlanForMode(text, ctx.cwd, mode, hashStore);
 			} catch (err: any) {
 				throw new Error(
 					`${err instanceof Error ? err.message : String(err)}\nNo changes were applied — the payload is all-or-nothing: fix the failing part and resubmit the whole payload.`,
 				);
 			}
 			const details = await applyPlan(plan, signal);
-			return { content: [{ type: "text" as const, text: formatSummary(details) }], details };
+			let summary = formatSummary(details);
+			if (plan.mode === "hash" && hashStore) {
+				const headers = recordAppliedHashChanges(hashStore, plan.changes);
+				if (headers.length > 0) summary += `\nFresh tags (re-read before another line-number edit):\n${headers.join("\n")}`;
+			}
+			return { content: [{ type: "text" as const, text: summary }], details };
 		},
 
 		renderCall(args, theme, context: RenderContext<UnifiedRenderState>) {
@@ -2272,7 +2368,16 @@ export default function unifiedEditExtension(pi: ExtensionAPI) {
 				component.settledError = false;
 			}
 
-			requestUnifiedEditPreview(component, text, key, context.cwd, context.argsComplete, () => context.invalidate());
+			requestUnifiedEditPreview(
+				component,
+				text,
+				key,
+				context.cwd,
+				context.argsComplete,
+				() => context.invalidate(),
+				hashStore,
+				mode,
+			);
 
 			return buildUnifiedEditCallComponent(component, text, theme, context.cwd, context.argsComplete);
 		},
@@ -2323,4 +2428,7 @@ export const __test = {
 	applyPlan,
 	applyUpdateChange,
 	applyEditsToNormalizedContent,
+	parseHashPayload,
+	buildHashChanges,
+	formatHashReadResult,
 };

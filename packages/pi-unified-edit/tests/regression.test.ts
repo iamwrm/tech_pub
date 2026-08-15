@@ -24,6 +24,7 @@ function registerTool(): ToolDefinition<any, any> {
 		registerTool: (registered: ToolDefinition<any, any>) => {
 			definition = registered;
 		},
+		on: () => {},
 	} as any;
 	unifiedEdit(pi);
 	assert.ok(definition, "extension must register a tool");
@@ -33,7 +34,7 @@ function registerTool(): ToolDefinition<any, any> {
 
 type ExecuteResult = Awaited<ReturnType<NonNullable<ToolDefinition<any, any>["execute"]>>>;
 
-type TestMode = "rows" | "patch" | "code" | "pi";
+type TestMode = "rows" | "patch" | "code" | "pi" | "hash";
 
 async function runEdit(cwd: string, text: string, mode: TestMode = "patch"): Promise<ExecuteResult> {
 	const prev = process.env.PI_UNIFIED_EDIT_MODE;

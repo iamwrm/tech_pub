@@ -16,6 +16,7 @@ function registerTool(): ToolDefinition<any, any> {
     registerTool: (registered: ToolDefinition<any, any>) => {
       definition = registered;
     },
+    on: () => {},
   } as any;
   unifiedEdit(pi);
   assert.ok(definition, "extension must register a tool");
