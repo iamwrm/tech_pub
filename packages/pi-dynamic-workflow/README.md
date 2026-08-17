@@ -77,7 +77,19 @@ On an unloaded branch the model first calls `workflow_load`, then writes a workf
     #3 ✓ final summary
 ```
 
-Once a TUI run reports `started in background`, it owns an independent cancellation lifetime. Use `/kill-workflow <runId>`, press `K` on its run in `/workflows`, or ask the main agent to call `workflow_tasks {action: 'kill', runId}`. `Esc` still cancels a foreground workflow or a launch that has not handed off, but aborting a later main-agent turn does not kill an accepted background run.
+While agents are still running, each row shows the same token / tool / elapsed
+parenthetical as a completed row, refreshed from live session telemetry:
+
+```text
+◆ Workflow: inspect_project (1/3 done, 2 running)
+  ✓ Scan 1/1
+    #1 ✓ repo inventory (12.4k tok · 3 tools · 18s)
+  ▶ Analyze 0/2 · 2 running
+    #2 ● source modules (4.1k tok · 1 tool · 6.2s)
+    #3 ● final summary (1.1s)
+```
+
+Once a TUI run reports `started in background`, the launching parent turn ends immediately—there is no extra model round just to acknowledge the launch—and the run owns an independent cancellation lifetime. Use `/kill-workflow <runId>`, press `K` on its run in `/workflows`, or ask the main agent to call `workflow_tasks {action: 'kill', runId}`. `Esc` still cancels a foreground workflow or a launch that has not handed off, but aborting a later main-agent turn does not kill an accepted background run.
 
 ### Saved workflows and `/workflows`
 
@@ -315,7 +327,9 @@ These semantics mirror Claude Code rather than imposing a single wall-clock dead
 
 ### Background vs foreground execution
 
-Like Claude Code, the `workflow` tool runs in the **background** only in the interactive TUI (`ctx.mode === "tui"`): it returns immediately with a `runId` and `status: "running"`, then delivers the completed result back to the session as a follow-up message (Claude Code's `<task-notification>`) once it finishes. In-flight background runs are tracked and cancelled on session shutdown (quit / reload / new).
+Like Claude Code, the `workflow` tool runs in the **background** only in the interactive TUI (`ctx.mode === "tui"`): it returns immediately with a `runId`, `status: "running"`, and `terminate: true`. Pi therefore settles the launching parent turn instead of spending another provider round acknowledging that the workflow is still running. Once the detached run finishes, the extension delivers its result as a follow-up message (Claude Code's `<task-notification>`) with `triggerTurn: true`, producing the one fresh parent interaction that can act on the result. In-flight background runs are tracked and cancelled on session shutdown (quit / reload / new).
+
+Completion delivery is settlement-gated and serialized. A fast workflow that finishes before its launching parent has settled waits; a workflow that finishes during an unrelated active turn also waits; concurrent completions are delivered in order, one triggered parent turn at a time. `/run-workflow` uses the same queue with a short command-handler hold because model-free dispatch has no surrounding `agent_start` / `agent_settled` pair. Duplicate callbacks from the same tool invocation are ignored without blocking a later resume that reuses its `runId`, and session shutdown closes and clears the queue before aborting detached runs.
 
 The `running` result is an explicit ownership handoff. Before it, the originating tool signal can cancel the launch. After it, the detached run is bounded only by its workflow-specific kill controller and the extension's session-shutdown signal. Consequently, an `Esc` or extension-driven abort of a later parent turn—including a forced compaction boundary—does not accidentally terminate accepted workflow work. Use `/kill-workflow`, `/workflows` (`K` for the run or `k` for one agent), or `workflow_tasks kill` for intentional cancellation.
 
@@ -341,18 +355,27 @@ const finding = await agent('Find security-sensitive files.', {
 })
 ```
 
-Under the hood this is a Pi `structured_output` tool with `terminate: true`, so the subagent ends on that call without an extra assistant turn.
+Under the hood this is a Pi `structured_output` tool with `terminate: true`, so the **child** ends on that call without an extra assistant turn. This is a separate typed child-to-workflow boundary: workflow JavaScript can branch, filter, vote, or synthesize from the validated object before the workflow's eventual parent result is delivered.
 
 ## How it works
 
 ```text
-user prompt
-  → Pi model writes a workflow script
-  → workflow tool parses + runs script in a vm sandbox
-  → script calls agent(), parallel(), pipeline()
-  → each agent() spawns an isolated Pi subagent session
-  → snapshots stream back as compact progress
-  → final structured result returned to the parent assistant
+launching parent turn
+  model ──calls workflow──> tool ──returns { running, terminate: true }──> settled
+                              │
+                              └── detached VM script
+                                    ├── agent() / parallel() / pipeline()
+                                    ├── typed child results via structured_output
+                                    └── final result
+                                           │
+                                           v
+                                  settlement-gated FIFO queue
+                                           │  (one at a time)
+                                           v
+                              workflow_result + triggerTurn: true
+                                           │
+                                           v
+                                  fresh parent interaction
 ```
 
 Subagents run in fresh Pi sessions with the standard coding tools, inherited global/project packages and extensions, and the parent session's project-trust decision. When the parent has persisted session storage, each child is also persisted as a linked Pi session.
@@ -367,6 +390,7 @@ Use the workflow tool's optional `autoCompaction` boolean or `WorkflowAgentOptio
 | --- | --- |
 | `src/workflow.ts` | AST-validated parser and sandboxed workflow runtime (stall retries, caps, `workflow()` nesting, per-agent option wiring). |
 | `src/workflow-tool.ts` | The deferred `workflow` / `workflow_tasks` tools, shared on-demand guide, script sources and persistence, rendering, and abort handling. |
+| `src/result-delivery.ts` | Settlement-gated FIFO delivery for detached workflow completions. |
 | `src/workflow-registry.ts` | Saved-workflow registry (built-in / user / project). |
 | `src/builtin-workflows.ts` | Built-in `deep-research` and `code-review` workflow scripts. |
 | `src/agent-types.ts` | Named agentType registry (`*.md` with frontmatter + role prompt). |
@@ -386,6 +410,12 @@ npm run dev
 
 Parser unit tests live in `tests/workflow-parser.test.ts` and cover both accepted and rejected script shapes.
 
+Live Pi/TUI qualification for this package uses
+`openai-codex/gpt-5.6-luna` unless the owner explicitly specifies another
+model. Do not silently substitute a smaller, cheaper, or similarly named model;
+record the exact provider/model, thinking level, run ID, and retained parent
+session with the evidence.
+
 ## rencc improvements over the prototype
 
 This fork closes several Claude-Code-style gaps in the original prototype:
@@ -400,7 +430,7 @@ This fork closes several Claude-Code-style gaps in the original prototype:
 - **Sandbox hardening.** Every injected callable (`agent`, `parallel`, `pipeline`, `log`, `phase`, the `console` methods, `process.cwd`) has its prototype/constructor stripped, closing the `injectedFn.constructor("return process")()` host-realm escape. Host intrinsics are no longer shared into the sandbox; the `vm` context uses its own fresh `JSON`/`Math`/`Array`/etc.
 - **CC-faithful timeouts.** `scriptTimeoutMs` (default 30s) bounds *only* the synchronous `vm` evaluation slice (matching Claude Code's internal sync-only `runInContext` timeout), so a `while (true) {}` cannot hang the host. There is no whole-run wall-clock deadline; instead activity-reset per-agent **stall detection** (180s, 5 retries — matching Claude Code) aborts and retries an individual stuck subagent and finally treats it as a normal failure (`null` + log), never killing the run.
 - **Runaway lifetime cap.** `maxAgents` (default 1000) caps total `agent()` spawns and throws a clear error when exceeded — the primary bound on `await agent()` runaways, alongside the abort signal and concurrency limiter.
-- **Background execution.** In TUI sessions a run executes in the background, returning a `runId` immediately and notifying on completion (Claude Code's `<task-notification>`); accepted runs have workflow-owned cancellation independent of later parent turns. In print/JSON/RPC modes it runs in the foreground so results are never lost. The mode check is intentional because RPC has `ctx.hasUI === true` in pi 0.80.6. In-flight background runs are cancelled and awaited on session shutdown.
+- **Terminal background handoff.** In TUI sessions a run executes in the background, returning a `runId` with `terminate: true` so the launch has no acknowledgement-only provider round. Accepted runs have workflow-owned cancellation independent of later parent turns. Completion waits for parent settlement and is serialized into one triggered turn per run (Claude Code's `<task-notification>`). In print/JSON/RPC modes the tool remains foreground and non-terminal so results are never lost. The mode check is intentional because RPC has `ctx.hasUI === true` in pi 0.80.6. In-flight background runs are cancelled and awaited on session shutdown.
 - **Structured-output retry.** When a subagent has a schema but finishes without calling `structured_output`, it is re-prompted with a firm nudge up to N times (default 2) before failing. Exhausted Pi provider retries (`stopReason: "error"`), aborted/truncated turns, and empty terminal text are failures rather than journaled successes.
 - **Real parent-environment inheritance.** Subagents inherit the parent Pi session's `model`, `thinkingLevel`, project-trust decision, file-backed global/project package settings, and automatic-compaction preference. Child resource loading preserves trusted project providers/workarounds while suppressing all project resources for untrusted parents; only workflow-tool extensions are filtered as a recursion guard. Temporary CLI `-e` extensions and inline factories cannot be reconstructed from settings, so SDK callers needing those can inject a paired `WorkflowAgentOptions.session.settingsManager` + `resourceLoader`.
 - **Real per-agent option wiring.** Script-level `opts.model` resolves through the session's model registry; `opts.agentType` resolves named agent definitions from `~/.pi/agent/agents` / `.pi/agents`; `opts.isolation: 'worktree'` creates actual detached git worktrees (50-slot limiter, auto-cleanup of unchanged checkouts).

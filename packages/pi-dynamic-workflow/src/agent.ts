@@ -27,6 +27,25 @@ const STRUCTURED_OUTPUT_NUDGE =
   "You did not call structured_output. You MUST call it exactly once; its arguments ARE your answer. Call it now.";
 
 /**
+ * Cap on consecutive mid-turn compaction boundaries observed inside one
+ * subagent attempt. Each boundary requires crossing the soft threshold again
+ * (hundreds of thousands of tokens of new context), so this cap is generous;
+ * exceeding it falls back to the ordinary terminal-failure path.
+ */
+const MAX_MID_TURN_BOUNDARIES = 8;
+
+/**
+ * Grace allowed after a continuation run settles for the NEXT continuation's
+ * agent_start to appear. The resume is a fire-and-forget session prompt whose
+ * preflight (input handlers, model/compaction checks, before_agent_start) runs
+ * a few microtasks after the settle event, so the engine must not declare a
+ * failure in that gap. Real failures without any boundary evidence never enter
+ * this wait (zero regression); a continuation that ended in a real provider
+ * error is delayed by at most this grace.
+ */
+const BOUNDARY_EVIDENCE_GRACE_MS = 500;
+
+/**
  * Tool name registered by this package's extension entry. Any extension exposing a
  * tool with this name is excluded from subagent sessions (recursion guard), no
  * matter where it was loaded from (this checkout, an npm-installed copy, a fork).
@@ -41,6 +60,15 @@ const WORKFLOW_PACKAGE_ROOT = (() => {
     return undefined;
   }
 })();
+
+/** Last assistant message in a session message list, or undefined when none exists. */
+function lastAssistantMessage(messages: readonly unknown[]): AssistantMessage | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i] as Partial<AssistantMessage>;
+    if (message.role === "assistant" && Array.isArray(message.content)) return message as AssistantMessage;
+  }
+  return undefined;
+}
 
 /**
  * Build a file-backed settings manager for a subagent. File-backed loading is
@@ -465,6 +493,50 @@ export class WorkflowAgent {
       settingsManager.applyOverrides({ compaction: { enabled: true } });
       terminalCompactionSuppressed = false;
     };
+
+    // Mid-turn boundary tracking (see promptSession below). A deliberate
+    // extension abort of a tool-follow-up turn is a boundary, not a failure,
+    // when the child session continues on its own: the continuation run starts
+    // before session.prompt() resolves. The flags below are reset at every
+    // error/aborted terminal (the boundary candidate) and updated by the
+    // native lifecycle events that follow, so the post-prompt decision never
+    // waits on time:
+    //   boundaryActive       - the last assistant terminal was error/aborted
+    //   continuationStarted  - a run started on its own after that terminal
+    //   continuationSettled  - that run settled (a fast continuation finishes
+    //                          before the post-prompt decision)
+    //   compactionStarted/Ended - a compaction ran after that terminal; while
+    //                          started and not ended it is in flight, which
+    //                          means the continuation is still on its way even
+    //                          though no run has started yet
+    let boundaryActive = false;
+    let continuationStarted = false;
+    let continuationSettled = false;
+    let compactionStarted = false;
+    let compactionEnded = false;
+    let lastFinalAgentEndMessages: readonly unknown[] | undefined;
+    // Sticky across boundaries within this attempt: any continuation or
+    // compaction evidence at all. Gates the post-settle evidence grace so
+    // real failures without any boundary activity keep failing immediately.
+    let boundaryEvidenceSeen = false;
+    // One bounded grace attempt per boundary for the next continuation's
+    // agent_start to appear after a settle (the fire-and-forget resume prompt
+    // runs a few microtasks of preflight before its run starts).
+    let graceAttempted = false;
+    // Set when any combined abort signal (stall, whole-run abort, manual kill)
+    // fired, so a pending boundary wait cannot swallow an abort.
+    let combinedAborted = false;
+    let boundaryWaitResolve: (() => void) | undefined;
+    let boundaryGraceTimer: ReturnType<typeof setTimeout> | undefined;
+    const resolveBoundaryWait = (): void => {
+      if (boundaryGraceTimer !== undefined) {
+        clearTimeout(boundaryGraceTimer);
+        boundaryGraceTimer = undefined;
+      }
+      const resolve = boundaryWaitResolve;
+      boundaryWaitResolve = undefined;
+      resolve?.();
+    };
     try {
       if (options.signal?.aborted) throw new Error("Subagent was aborted");
       try {
@@ -498,10 +570,47 @@ export class WorkflowAgent {
         }
         try {
           if (event.type === "agent_start") {
+            if (boundaryActive) {
+              continuationStarted = true;
+              boundaryEvidenceSeen = true;
+            }
             restoreTerminalCompaction();
+            resolveBoundaryWait();
+          } else if (event.type === "agent_end") {
+            if (!event.willRetry) {
+              lastFinalAgentEndMessages = event.messages;
+            }
+          } else if (event.type === "agent_settled") {
+            if (continuationStarted) continuationSettled = true;
+            // The run that followed the boundary has settled. Its extension
+            // handlers (which queue the next continuation, if any) already ran
+            // before this event, so re-evaluating here sees the next run's
+            // agent_start too. Wake the boundary wait.
+            resolveBoundaryWait();
+          } else if (event.type === "compaction_start") {
+            if (boundaryActive) {
+              compactionStarted = true;
+              boundaryEvidenceSeen = true;
+            }
+            resolveBoundaryWait();
+          } else if (event.type === "compaction_end") {
+            compactionEnded = true;
+            resolveBoundaryWait();
           } else if (event.type === "message_end") {
             const assistant = event.message as Partial<AssistantMessage>;
-            if (assistant.role === "assistant" && assistant.stopReason === "stop") {
+            if (
+              assistant.role === "assistant" &&
+              (assistant.stopReason === "error" || assistant.stopReason === "aborted")
+            ) {
+              // Reset the boundary state at the candidate terminal so the
+              // post-prompt check only sees lifecycle events that follow it.
+              boundaryActive = true;
+              continuationStarted = false;
+              continuationSettled = false;
+              compactionStarted = false;
+              compactionEnded = false;
+              graceAttempted = false;
+            } else if (assistant.role === "assistant" && assistant.stopReason === "stop") {
               suppressTerminalCompaction();
             }
           } else if (
@@ -560,6 +669,10 @@ export class WorkflowAgent {
         const onAbort = () => {
           if (abortStarted) return;
           abortStarted = true;
+          combinedAborted = true;
+          // A pending boundary wait must not outlive an abort: release it so
+          // promptSession can re-check and surface the abort as a failure.
+          resolveBoundaryWait();
           session.abortCompaction();
           session.abortBranchSummary();
           session.abort().catch(() => {});
@@ -571,6 +684,23 @@ export class WorkflowAgent {
         if (options.signal.aborted) onAbort();
       }
 
+      // Wait for the next boundary-relevant session event (a run settle, a
+      // self-started run, a compaction transition) or, with a grace timeout,
+      // for the evidence window to elapse. The stall timer stays armed and
+      // every session event resets it, and an abort releases the wait
+      // immediately via resolveBoundaryWait(), so this cannot hang.
+      const waitForBoundaryProgress = (graceMs?: number): Promise<void> =>
+        new Promise<void>((resolve) => {
+          boundaryWaitResolve = resolve;
+          if (graceMs !== undefined && boundaryGraceTimer === undefined) {
+            boundaryGraceTimer = setTimeout(() => {
+              boundaryGraceTimer = undefined;
+              resolve();
+            }, graceMs);
+          }
+          if (combinedAborted) resolve();
+        });
+
       const promptSession = async (text: string): Promise<AssistantMessage> => {
         const priorEntryIds = new Set(sessionManager.getEntries().map((entry) => entry.id));
         try {
@@ -579,8 +709,48 @@ export class WorkflowAgent {
           restoreTerminalCompaction();
         }
         if (options.signal?.aborted) throw new Error("Subagent was aborted");
-        const terminal = this.currentTerminalAssistant(sessionManager.getBranch(), priorEntryIds);
+        let terminal = this.currentTerminalAssistant(sessionManager.getBranch(), priorEntryIds);
         if (!terminal) throw new Error("Subagent completed without an assistant response");
+
+        // Mid-turn compaction boundary: an extension (for example the
+        // mid-turn-compact extension) may deliberately abort the run at a
+        // tool-follow-up turn so Pi's post-run compaction can shrink the
+        // context, then queue a continuation user message. That continuation
+        // run starts on its own — the engine never asked for it — while
+        // session.prompt() is still awaiting the settled lifecycle, so a
+        // self-started run (or an in-flight manual compaction that will
+        // produce one) after an error terminal is evidence of a boundary, not
+        // a failure: wait for the continuation's terminal and treat it as the
+        // attempt's result. Without that evidence, fail exactly as before.
+        for (let boundary = 0; boundary < MAX_MID_TURN_BOUNDARIES; boundary++) {
+          if (terminal.stopReason !== "error" && terminal.stopReason !== "aborted") break;
+          const compactionInFlight = compactionStarted && !compactionEnded;
+          if (!continuationStarted && !compactionInFlight) {
+            // No continuation evidence yet. A settle may have just happened
+            // with the next continuation's run still in preflight (its
+            // agent_start fires a few microtasks after the settle event), so
+            // give that race one bounded grace. Real failures without any
+            // boundary evidence never get here and keep failing immediately.
+            if (!boundaryEvidenceSeen || graceAttempted) break; // real failure
+            graceAttempted = true;
+            await waitForBoundaryProgress(BOUNDARY_EVIDENCE_GRACE_MS);
+            if (combinedAborted) throw new Error("Subagent was aborted");
+            continue; // re-evaluate: evidence may have arrived
+          }
+          if (!continuationSettled) {
+            // Continuation run is running (or will start after an in-flight
+            // manual compaction). Wait for its agent_settled; the stall timer
+            // stays armed and every session event resets it, so this wait
+            // cannot outlive a stalled session, and an abort releases it
+            // immediately via resolveBoundaryWait().
+            await waitForBoundaryProgress();
+          }
+          if (combinedAborted) throw new Error("Subagent was aborted");
+          const continuationMessages = lastFinalAgentEndMessages;
+          const continuationTerminal = continuationMessages ? lastAssistantMessage(continuationMessages) : undefined;
+          if (continuationTerminal) terminal = continuationTerminal;
+          if (!terminal) throw new Error("Subagent completed without an assistant response");
+        }
         this.assertTerminalAssistant(terminal);
         return terminal;
       };
@@ -610,6 +780,9 @@ export class WorkflowAgent {
       return text as AgentRunResult<TSchemaDef>;
     } finally {
       restoreTerminalCompaction();
+      // Release any pending boundary wait and its grace timer so neither can
+      // outlive the attempt (a stray timer would keep the process alive).
+      resolveBoundaryWait();
       unsubscribeSession?.();
       removeAbortListener?.();
       try {

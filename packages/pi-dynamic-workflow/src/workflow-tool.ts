@@ -54,6 +54,8 @@ interface LiveBackgroundUi {
    * own settle chain. */
   readonly key: string;
   render(snapshot: WorkflowSnapshot, completed?: boolean): void;
+  /** Start a self-defusing refresh timer so running-agent elapsed/tokens stay live. */
+  startRefresh(tick: () => void, intervalMs?: number): void;
   clear(): void;
   notify(message: string, type: "info" | "warning" | "error"): void;
 }
@@ -61,13 +63,39 @@ interface LiveBackgroundUi {
 function createLiveBackgroundUi(ui: ExtensionContext["ui"] | undefined, runId: string, name: string): LiveBackgroundUi {
   const key = `dynamic-workflow:${runId}`;
   if (!ui) {
-    return { key, render() {}, clear() {}, notify() {} };
+    return { key, render() {}, startRefresh() {}, clear() {}, notify() {} };
   }
   let cleared = false;
+  let finished = false;
+  let refreshTimer: ReturnType<typeof setInterval> | undefined;
+  let lastFrame: string | undefined;
+  const stopRefresh = () => {
+    if (!refreshTimer) return;
+    clearInterval(refreshTimer);
+    refreshTimer = undefined;
+  };
   return {
     key,
+    startRefresh(tick, intervalMs = 400) {
+      if (cleared || finished || refreshTimer || intervalMs <= 0) return;
+      refreshTimer = setInterval(() => {
+        try {
+          tick();
+        } catch {
+          // A refresh-tick failure must never take down the detached run.
+          stopRefresh();
+        }
+      }, intervalMs);
+      refreshTimer.unref?.();
+    },
     render(snapshot, completed = false) {
       if (cleared) return;
+      if (completed) {
+        stopRefresh();
+        finished = true;
+      } else if (finished) {
+        return;
+      }
       const total = snapshot.agentCount;
       const done = snapshot.doneCount;
       const errors = snapshot.errorCount;
@@ -78,7 +106,11 @@ function createLiveBackgroundUi(ui: ExtensionContext["ui"] | undefined, runId: s
           ? `${name}: ${done} done, ${errors} failed of ${total} agents`
           : `${name}: ${completed ? "completed " : ""}${done}/${total} agents`;
       try {
-        ui.setWidget(key, renderWorkflowText(snapshot, completed).split("\n"), { placement: LIVE_WIDGET_PLACEMENT });
+        const frame = renderWorkflowText(snapshot, completed);
+        if (frame !== lastFrame) {
+          lastFrame = frame;
+          ui.setWidget(key, frame.split("\n"), { placement: LIVE_WIDGET_PLACEMENT });
+        }
       } catch {
         // UI torn down mid-run; ignore so the detached run keeps making progress.
       }
@@ -91,6 +123,7 @@ function createLiveBackgroundUi(ui: ExtensionContext["ui"] | undefined, runId: s
     clear() {
       if (cleared) return;
       cleared = true;
+      stopRefresh();
       try {
         ui.setWidget(key, undefined);
       } catch {
@@ -114,9 +147,10 @@ function createLiveBackgroundUi(ui: ExtensionContext["ui"] | undefined, runId: s
 
 /**
  * Add exact provider-reported usage from active subagent sessions to a live
- * snapshot. `/workflows` polls getSnapshot() every 400ms, so this pull model
- * needs no extra timer or per-stream-event telemetry churn. Finalized snapshot
- * fields still win once onAgentEnd records the authoritative total.
+ * snapshot. `/workflows` and the background progress widget both poll this
+ * every 400ms, so running-agent tokens/tools/elapsed stay current without
+ * per-stream-event telemetry churn. Finalized snapshot fields still win once
+ * onAgentEnd records the authoritative total.
  */
 function withLiveAgentTokens(snapshot: WorkflowSnapshot, controls: WorkflowRunControls | undefined): WorkflowSnapshot {
   if (!controls) return snapshot;
@@ -126,12 +160,14 @@ function withLiveAgentTokens(snapshot: WorkflowSnapshot, controls: WorkflowRunCo
     try {
       const telemetry = controls.getAgentSession(agent.id)?.getTelemetry?.();
       const tokens = telemetry?.tokens ?? telemetry?.usage?.totalTokens;
-      if (typeof tokens !== "number") return agent;
+      if (!telemetry) return agent;
       changed = true;
       return {
         ...agent,
-        tokens,
+        ...(typeof tokens === "number" ? { tokens } : {}),
         ...(telemetry?.estimatedTokens ? { estimatedTokens: true } : {}),
+        ...(typeof telemetry.toolCalls === "number" ? { toolCalls: telemetry.toolCalls } : {}),
+        ...(typeof telemetry.elapsedMs === "number" ? { elapsedMs: telemetry.elapsedMs } : {}),
       };
     } catch {
       // Live telemetry is advisory; a stale/disposed session must not break UI.
@@ -193,6 +229,8 @@ export type WorkflowToolInput = {
 
 /** Outcome delivered back to the session when a backgrounded run finishes. */
 export interface WorkflowBackgroundResult {
+  /** Internal tool-instance ordinal used to deduplicate one invocation's callback. */
+  deliveryId: number;
   runId: string;
   name: string;
   status: "completed" | "failed" | "aborted";
@@ -215,9 +253,10 @@ export interface WorkflowToolOptions {
   getThinkingLevel?: () => import("@earendil-works/pi-agent-core").ThinkingLevel | undefined;
   /**
    * Deliver a backgrounded run's outcome back to the session (mirrors Claude
-   * Code's <task-notification>). The extension entrypoint wires this to
-   * pi.sendMessage({...}, { triggerTurn: true }) so the idle model continues.
-   * Only ever called on the background (interactive) path.
+   * Code's <task-notification>). The extension entrypoint queues this until the
+   * parent is idle, then uses pi.sendMessage({...}, { triggerTurn: true }) so the
+   * model continues in one fresh turn per completion. Only ever called on the
+   * background (interactive) path.
    */
   sendResult?: (result: WorkflowBackgroundResult) => void;
   /**
@@ -265,6 +304,12 @@ export interface WorkflowToolOptions {
   resolveAgentType?: (name: string) => ResolvedAgentType | undefined;
   /** Test seam: override the worktree base directory for isolation:'worktree'. */
   worktreeDir?: string;
+  /**
+   * Test seam: live widget refresh interval in milliseconds. Production uses 400ms
+   * so running-agent elapsed/tokens tick without per-stream-event churn. `0` disables
+   * the timer (event-driven renders only).
+   */
+  liveRefreshMs?: number;
 }
 
 export interface WorkflowGuideOptions {
@@ -330,7 +375,7 @@ export function buildWorkflowPromptGuidelines(options: WorkflowGuideOptions = {}
     "For workflow, subagents inherit the parent session's model and thinking level by default. opts.model overrides the subagent's model for real ('provider/model-id' or a model id known to the session). opts.agentType resolves a named agent definition from ~/.pi/agent/agents/*.md or .pi/agents/*.md (role prompt + optional model/tool allowlist). Unresolvable references fall back to prompt hints and are logged.",
     "For workflow, opts.isolation: 'worktree' runs the agent in a REAL disposable git worktree (detached checkout of the repo). Use it ONLY when agents mutate files in parallel and would conflict - it costs setup time and disk. Unchanged worktrees are auto-removed; changed ones are kept and their paths logged.",
     "For workflow, to resume a previous workflow run, pass its runId as resumeFromRunId; resume invalidation is per-call content-addressed (ordinal + prompt + label + schema + per-agent options), not Claude-Code prefix-based, so thread upstream results into downstream prompts so changing an earlier step forces dependent steps to re-run on resume.",
-    "For workflow, in an interactive session the run executes in the BACKGROUND: the tool returns immediately with a runId and status 'running', then delivers the completed result as a follow-up message once it finishes - do not block waiting for it. In non-interactive (-p/print/RPC) mode the tool runs in the foreground and returns the full result synchronously.",
+    "For workflow, in an interactive session the run executes in the BACKGROUND: the tool returns immediately with a runId and status 'running' and ends the current parent turn without an acknowledgement round. Once finished, it delivers the completed result in one fresh parent turn - do not block waiting for it. In non-interactive (-p/print/RPC) mode the tool runs in the foreground and returns the full result synchronously.",
     "For workflow, an accepted background run has an independent cancellation lifetime: aborting a later parent turn does not stop it. Use workflow_tasks {action: 'kill', runId} (or agentIds for selected subagents) when the user asks to stop workflow work.",
   ];
 }
@@ -354,6 +399,7 @@ export function buildWorkflowGuide(options: WorkflowGuideOptions = {}): string {
 }
 
 export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefinition<typeof workflowToolSchema, any> {
+  let nextDeliveryId = 0;
   return defineTool({
     name: "workflow",
     label: "Workflow",
@@ -450,20 +496,21 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
       // ctx.ui (the supported post-return channel, since onUpdate is dead once execute()
       // returns). Stays undefined on the foreground path so that path is untouched.
       let liveWidget: LiveBackgroundUi | undefined;
+      // Live per-agent kill/session controls for the CURRENT runWorkflow invocation,
+      // captured via onRunControls and exposed through registerLiveUi so the
+      // workflow_tasks surface can kill specific agents in this run.
+      let runControls: WorkflowRunControls | undefined;
       const update = () => {
         snapshot = recomputeWorkflowSnapshot(snapshot);
-        if (liveStreaming) display.update(snapshot);
-        liveWidget?.render(snapshot);
+        const live = withLiveAgentTokens(snapshot, runControls);
+        if (liveStreaming) display.update(live);
+        liveWidget?.render(live);
       };
 
       // Run the parsed-and-validated workflow under `runSignal`, streaming live
       // snapshot updates. Returns the finished tool result, or throws on abort /
       // fatal error. Shared by the foreground and background code paths so the
       // result shape and display behavior stay identical.
-      // Live per-agent kill controls for the CURRENT runWorkflow invocation,
-      // captured via onRunControls and exposed through registerLiveUi so the
-      // workflow_tasks surface can kill specific agents in this run.
-      let runControls: WorkflowRunControls | undefined;
 
       const runWorkflowToResult = async (
         runSignal: AbortSignal | undefined,
@@ -598,6 +645,7 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
       const canBackground = interactiveTui && typeof options.sendResult === "function";
 
       if (canBackground) {
+        const deliveryId = ++nextDeliveryId;
         // A background run becomes an independently owned task when this execute()
         // call returns status "running". Relay the originating tool signal only while
         // the launch is being registered; keeping it composed after return would let
@@ -624,6 +672,10 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
         // before the first agent callback fires.
         liveWidget = createLiveBackgroundUi(ctx?.ui, runId, parsed.meta.name);
         liveWidget.render(snapshot);
+        liveWidget.startRefresh(() => {
+          if (!snapshot.agents.some((agent) => agent.status === "running")) return;
+          update();
+        }, options.liveRefreshMs ?? 400);
 
         // Detach: run to completion off the tool's turn and deliver on completion,
         // mirroring Claude Code's <task-notification>. Errors are delivered, never
@@ -647,6 +699,7 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
             // in-flight progress.
             try {
               sendResult({
+                deliveryId,
                 runId,
                 name: parsed.meta.name,
                 status,
@@ -679,6 +732,7 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
             }
             try {
               sendResult({
+                deliveryId,
                 runId,
                 name: parsed.meta.name,
                 status,
@@ -745,6 +799,10 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
             status: "running",
             ...(scriptFilePath ? { scriptPath: scriptFilePath } : {}),
           },
+          // The detached run owns its continuation. Ending the parent here avoids
+          // an otherwise-wasted provider round whose only job is to acknowledge
+          // status "running"; completion later triggers one fresh parent turn.
+          terminate: true,
         };
       }
 

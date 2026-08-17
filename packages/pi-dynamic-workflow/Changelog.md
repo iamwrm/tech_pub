@@ -2,12 +2,50 @@
 
 ## Unreleased
 
+### Added
+- The live background progress widget now shows token, tool, and elapsed
+  metrics for running subagents (same parenthetical as completed rows) and
+  refreshes them on a 400ms timer from live session telemetry.
+- Mid-turn compaction boundaries now survive inside subagent sessions. When an
+  extension (for example the mid-turn-compact extension) deliberately aborts a
+  child's tool-follow-up turn to compact and then queues a continuation user
+  message, the continuation run starts on its own before `session.prompt()`
+  resolves. The engine now detects that self-started run (or an in-flight
+  manual compaction) from the child's native lifecycle events, waits for the
+  continuation's terminal, and returns it as the attempt's result instead of
+  declaring "Subagent provider failed: This operation was aborted" and
+  disposing the session mid-continuation. Repeated boundaries continue through
+  every continuation run; real provider errors without any boundary evidence
+  still fail immediately (zero regression), and a continuation that ends in a
+  real provider error surfaces that error after at most a bounded 500 ms
+  evidence grace. Stall, whole-run abort, and manual kill signals release a
+  pending boundary wait immediately.
+- SDK-level regression coverage for: continuation success, abort-shaped errors
+  without a continuation, failing continuations, repeated boundaries, signal
+  abort during the boundary wait, and the in-flight manual compaction path.
+
+### Documentation
+- Pinned live Pi/TUI qualification to `openai-codex/gpt-5.6-luna` unless the owner explicitly requests another model; silent substitution with a smaller, cheaper, or similarly named model is not acceptable. Evidence must record the exact provider/model, thinking level, run ID, and retained parent session.
+
+### Validated
+- Re-ran the 1.9.0 terminal-handoff scenario on Pi 0.84.2 with `openai-codex/gpt-5.6-luna` at minimal thinking. Parent and child both used the designated model, run `wf_01a6dc44-64b` completed, and the parent sequence remained `assistant(workflow call) → running tool result → workflow_result → assistant(final)` with no acknowledgement provider response.
+- Biome check, build, extension typecheck, and all 186 unit/integration tests pass.
+
+## 1.9.0 - 2026-08-15
+
 ### Changed
-- Updated the locked `@earendil-works/pi-*` development baseline from 0.83.0 to 0.84.1 and synchronized the lockfile root metadata with package version 1.8.8. Runtime source and peer ranges are unchanged.
+- Accepted interactive background launches now return `terminate: true`, ending the launching parent turn without an acknowledgement-only provider round. Foreground print/JSON/RPC execution remains non-terminal and returns the final workflow result normally.
+- Background completion delivery now waits for parent `agent_settled`, deduplicates callbacks per tool invocation (without blocking resumed runs that reuse a `runId`), and serializes concurrent completions into one `workflow_result`-triggered parent turn apiece. Model-free `/run-workflow` dispatch uses a short delivery hold, and session shutdown closes the queue before aborting detached runs.
+- Updated the locked `@earendil-works/pi-*` development baseline from 0.83.0 to 0.84.1 and synchronized the lockfile root metadata with package version 1.9.0. Runtime source and peer ranges are unchanged.
+
+### Retained
+- `agent(..., { schema })` and its terminal child-only `structured_output` tool remain intact: typed intermediate values are consumed inside workflow JavaScript and are not replaceable by the workflow tool's final parent-result boundary.
 
 ### Validated
 - Pi 0.84.1 keeps the public AgentSession, extension lifecycle, dynamic-tool loading, and reused TUI component contracts used by this package unchanged.
-- Biome check, build, extension typecheck, and all 171 unit/integration tests pass against Pi 0.84.1.
+- Added lifecycle coverage for fast completion before launch settlement, concurrent serialization, deduplication, direct-dispatch holds, session cleanup, failed delivery, terminal background handoff, and unchanged foreground semantics.
+- Biome check, build, extension typecheck, and all 178 unit/integration tests pass.
+- A live Pi 0.84.2 TUI run produced the exact parent sequence `assistant(workflow call) → running tool result → workflow_result → assistant(final)`, with no acknowledgement assistant response between launch and completion.
 
 ## 1.8.8 - 2026-08-13
 
