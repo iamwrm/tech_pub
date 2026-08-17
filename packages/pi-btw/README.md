@@ -5,7 +5,7 @@ branch per source session. It starts **no-tool by default**, supports explicit
 `/tools` opt-in to all core tools, and can materialize completed turns as a
 normal resumable session. The branch freezes its parent context, model,
 thinking level, effective system prompt, and cwd at the first question. It is
-the pi 0.84.1 port of retired Prime Agent `pa-btw2`.
+a pi 0.84.1 background side-branch extension.
 
 Lifecycle and design: [`IV-0017`](../../docs/IV-DC/IV-0017-pi-btw.md).
 
