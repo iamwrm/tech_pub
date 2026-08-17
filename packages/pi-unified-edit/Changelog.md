@@ -3,6 +3,18 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-17
+
+- **Default mode is now `hash`.** Unset, empty, or unknown
+  `PI_UNIFIED_EDIT_MODE` values select hash (was patch). Explicit
+  `patch|rows|code|pi|hash|hashline` still work. Owner decision after the
+  five-mode matrix: hash tied patch at 92/96 with lower mean/p95 wall and
+  fewer tokens. Set `PI_UNIFIED_EDIT_MODE=patch` to keep the previous
+  default. Because hash is default, successful stock `read` results are
+  transformed to `[path#TAG]` plus `N:text` unless another mode is selected.
+- **Default-mode regression.** Unset, empty, and invalid env values now
+  register the hash prompt and read transformer. Total suite: 92 tests.
+
 ## [0.2.0] - 2026-08-15
 
 - **Hash mode (`PI_UNIFIED_EDIT_MODE=hash`, `hashline` alias).** Added a

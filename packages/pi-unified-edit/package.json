@@ -1,6 +1,6 @@
 {
   "name": "pi-unified-edit",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Atomic multi-file pi edit extension with patch, rows, code, pi-JSON, and OMP-compatible hash-line modes.",
   "private": true,
   "type": "module",

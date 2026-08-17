@@ -50,16 +50,16 @@ import {
 // LOCAL (0.2.0): the extension ships five edit modes (row script, apply-patch,
 // code, pi-native JSON, OMP-compatible hash lines) and exactly ONE is active
 // per process, selected by PI_UNIFIED_EDIT_MODE
-// (rows | patch | code | pi | hash, default patch). The model
-// only ever sees the active mode's prompt and payload dialect — no format
-// choice, so no ambiguity.
+// (rows | patch | code | pi | hash). LOCAL (0.3.0): default is hash.
+// The model only ever sees the active mode's prompt and payload dialect —
+// no format choice, so no ambiguity.
 type EditMode = "rows" | "patch" | "code" | "pi" | "hash";
 
 function getEditMode(): EditMode {
 	const mode = process.env.PI_UNIFIED_EDIT_MODE?.trim().toLowerCase();
-	if (mode === "rows" || mode === "code" || mode === "pi" || mode === "hash") return mode;
+	if (mode === "rows" || mode === "patch" || mode === "code" || mode === "pi" || mode === "hash") return mode;
 	if (mode === "hashline") return "hash";
-	return "patch";
+	return "hash";
 }
 
 const ROWS_DESCRIPTION = `Edit files with one marked row edit script. Multiple [path] sections per call; all-or-nothing.

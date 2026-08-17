@@ -14,9 +14,10 @@ type CapturedHashExtension = {
 	toolResult: ToolResultHandler;
 };
 
-function registerHashExtension(alias = "hash"): CapturedHashExtension {
+function registerHashExtension(alias: string | undefined = "hash"): CapturedHashExtension {
 	const previous = process.env.PI_UNIFIED_EDIT_MODE;
-	process.env.PI_UNIFIED_EDIT_MODE = alias;
+	if (alias === undefined) delete process.env.PI_UNIFIED_EDIT_MODE;
+	else process.env.PI_UNIFIED_EDIT_MODE = alias;
 	let definition: ToolDefinition<any, any> | undefined;
 	let toolResult: ToolResultHandler | undefined;
 	try {
@@ -242,6 +243,15 @@ test("PI_UNIFIED_EDIT_MODE=hashline is accepted as a hash alias", () => {
 	const extension = registerHashExtension("hashline");
 	assert.match(extension.definition.description, /hash lines/i);
 	assert.match(extension.definition.promptSnippet ?? "", /hash-anchored/i);
+});
+
+test("unset and unknown PI_UNIFIED_EDIT_MODE default to hash", () => {
+	for (const alias of [undefined, "", "not-a-mode"] as const) {
+		const extension = registerHashExtension(alias);
+		assert.match(extension.definition.description, /hash lines/i);
+		assert.match(extension.definition.promptSnippet ?? "", /hash-anchored/i);
+		assert.ok(extension.toolResult, "default hash mode must transform read results");
+	}
 });
 
 test("HashSnapshotStore requires exact content even when a 16-bit tag matches normalized whitespace", () => {

@@ -31,11 +31,11 @@ rejected with a hint naming the configured mode.
 
 | Mode | Payload and operations |
 | --- | --- |
-| `patch` (default) | `*** Begin Patch` / `*** End Patch`; `*** Add File`, `*** Delete File`, and `*** Update File` with `@@` context, `-` removals, `+` additions. Standard `@@ -N +M @@` line-range headers are accepted and ignored. |
+| `hash` (`hashline` alias, default) | OMP-compatible explicit-line core. In this mode `read` emits `[path#TAG]` and `N:text`; `edit` accepts `PUT N.=M`, `PUT <N`/`>N`/`>$`, `CUT N.=M`, `REM`, and `MV`. All coordinates address the original tagged snapshot. |
+| `patch` | `*** Begin Patch` / `*** End Patch`; `*** Add File`, `*** Delete File`, and `*** Update File` with `@@` context, `-` removals, `+` additions. Standard `@@ -N +M @@` line-range headers are accepted and ignored. |
 | `rows` | Column-0 `[path]` sections with `@REPLACE`, `@INS.PRE`, `@INS.POST`, `@INS.BEFORE`, `@INS.AFTER`, `@APPEND`, and `@DEL N-M`; replacement context anchors the matched block and insertions target the named line. |
 | `code` | Payloads beginning with `js:` or a JavaScript fence (&#96;&#96;&#96;js); they run in a `node:vm` sandbox exposing synchronous `readFile`, `readLines`, and `writeFile`; paths resolve from cwd and there is no delete API. |
 | `pi` | Pi-native JSON `{"path": ..., "edits": [{"oldText": ..., "newText": ...}]}` or an array for multiple files; ordered substring replacements, existing files only. |
-| `hash` (`hashline` alias) | OMP-compatible explicit-line core. In this mode `read` emits `[path#TAG]` and `N:text`; `edit` accepts `PUT N.=M`, `PUT <N`/`>N`/`>$`, `CUT N.=M`, `REM`, and `MV`. All coordinates address the original tagged snapshot. |
 
 Use, for example:
 
@@ -121,7 +121,7 @@ npm test
 npm pack --dry-run
 ```
 
-`npm test` currently drives 91 headless cases covering all five dialects,
+`npm test` currently drives 92 headless cases covering all five dialects,
 atomicity, parser/matching diagnostics, binary rejection, abort/rollback, and
 queued concurrent update/add races. The E-series behavior methodology is
 statistical: use `PI_UNIFIED_EDIT_MODE=<mode> ./run_all.sh <provider> <model> <tag>`
