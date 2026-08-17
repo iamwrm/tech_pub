@@ -1,7 +1,7 @@
 {
   "name": "pi-prompt-magazine",
-  "version": "0.1.2",
-  "description": "pi extension: multi-slot prompt stash queue ('magazine'). End a draft with ;; to stash it instead of sending; live queue widget above the prompt bar + /magazine browser (restore / peek / delete / reorder / clear).",
+  "version": "0.3.1",
+  "description": "pi extension: SQLite-backed per-session prompt stash queue ('magazine'). End a draft with ;; to stash it instead of sending; live widget plus browse, restore, reorder, clear, and orphan recovery commands.",
   "private": true,
   "type": "module",
   "keywords": [
@@ -16,6 +16,8 @@
   "files": [
     "index.ts",
     "magazine.ts",
+    "order-mode.ts",
+    "storage.ts",
     "tests",
     "README.md",
     "Changelog.md",
@@ -34,11 +36,25 @@
   "engines": {
     "node": ">=22.8.0"
   },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
   "devDependencies": {
     "@earendil-works/pi-agent-core": "^0.84.1",
     "@earendil-works/pi-coding-agent": "^0.84.1",
+    "@earendil-works/pi-tui": "^0.84.2",
+    "@types/better-sqlite3": "9.6.0",
     "@types/node": "^24.0.0",
     "tsx": "latest",
     "typescript": "latest"
+  },
+  "dependencies": {
+    "better-sqlite3": "13.0.3"
   }
 }

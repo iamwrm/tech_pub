@@ -11,5 +11,5 @@
     "forceConsistentCasingInFileNames": true,
     "allowImportingTsExtensions": true
   },
-  "include": ["index.ts", "magazine.ts", "tests/**/*.ts"]
+  "include": ["index.ts", "magazine.ts", "order-mode.ts", "storage.ts", "tests/**/*.ts"]
 }
