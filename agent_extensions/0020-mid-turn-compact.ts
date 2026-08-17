@@ -3,10 +3,12 @@
  *
  * Stock pi only runs soft-threshold auto-compaction after `agent_end` (and
  * before the next prompt). Long tool loops can therefore overshoot the soft
- * window until hard overflow. This extension interrupts at `turn_end` when
- * tool work is still pending: it aborts the active run, lets pi finish its
- * normal post-run compaction check, then falls back to public `ctx.compact()`
- * only if context usage is still over the soft threshold at `agent_settled`.
+ * window until hard overflow. After a `turn_end` produces tool results, this
+ * extension waits for the next `turn_start` to prove that the run will
+ * continue, then aborts before provider request construction. Pi can therefore
+ * finish its normal post-run compaction check; the extension falls back to
+ * public `ctx.compact()` only if no compact was saved and usage is still over
+ * the soft threshold at `agent_settled`.
  *
  * There is no public in-run `agent.continue()`: both this flow and direct
  * `ctx.compact()` end the active run. Resume is therefore a synthetic user
@@ -14,7 +16,8 @@
  *
  * Run `/mid-turn-compact` for interactive settings or enable directly with
  * `/mid-turn-compact enable`. Default: disabled with a 100% window scale when
- * no preference is saved. Enablement is durable in Pi's global settings;
+ * no preference is saved. Enablement is durable in Pi's global settings via
+ * Pi-compatible locked read/merge/write that preserves unrelated settings;
  * `/mid-turn-compact 150` and `/mid-turn-compact 30%` change the effective
  * context window used by this extension without mutating pi's model catalog.
  *
@@ -22,12 +25,20 @@
  *   tokens > (contextWindow * percentage / 100) - reserveTokens
  *   (default reserve 16384)
  *
+ * Codex request-body pressure is learned separately. If a tool-follow-up
+ * request returns Envoy's exact retry-buffer-limit error, this extension
+ * remembers that request's logical JSON size for the current session and
+ * preemptively compacts later same-route tool follow-ups at or above it. No
+ * universal proxy limit is inferred or hard-coded.
+ *
  * ---------------------------------------------------------------------------
- * IMPORTANT — tool-call / tool-result integrity with server compaction (0017)
+ * IMPORTANT — tool-call / tool-result integrity with server compaction
+ * (pi-openai-server-compaction)
  * ---------------------------------------------------------------------------
  *
- * This extension only chooses *when* to compact. When 0017 owns the compact
- * boundary (openai-codex / qualified Responses mirrors), the *how* preserves
+ * This extension only chooses *when* to compact. When
+ * pi-openai-server-compaction owns the compact boundary (openai-codex /
+ * qualified Responses mirrors), the *how* preserves
  * call/result pairing. That property is load-bearing for mid-turn use and
  * must not be broken by alternate compact strategies.
  *
@@ -56,21 +67,22 @@
  * open tool-result text is not (that is intentional server compaction).
  *
  * Pi `firstKeptEntryId` / keepRecent still decide the session-tree cut for
- * readable context; 0017 provider replay uses replacementHistory + tail after
- * the compaction node, not "artifact + half-open firstKept tool results."
+ * readable context; pi-openai-server-compaction provider replay uses
+ * replacementHistory + tail after the compaction node, not "artifact +
+ * half-open firstKept tool results."
  * Pi never cuts *on* a bare toolResult either (valid cut = user/assistant/…).
  *
- * If compact is implemented without 0017 (readable local summarizer), the
- * same turn_end timing applies, but the server-artifact pairing story above
+ * If compact is implemented without pi-openai-server-compaction (readable
+ * local summarizer), the same proven post-tool turn timing applies, but
+ * the server-artifact pairing story above
  * does not — readable summaries replace cut history with text, not ciphertext.
- * 0017 is an optional backend enhancement; 0020 imports no sibling extension
+ * pi-openai-server-compaction is an optional backend enhancement; 0020 imports no sibling extension
  * and remains directly activatable against Pi's public compact API. 0021 is
  * orthogonal reasoning-replay policy and is not required by this extension.
  */
 
-import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { mkdirSync, readFileSync, rmdirSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 
 import {
 	getAgentDir,
@@ -124,6 +136,44 @@ export const PI_SETTINGS_NAMESPACE = "renPublicPackage";
 /** Settings key for the durable mid-turn compact preference. */
 export const MID_TURN_COMPACT_SETTINGS_KEY = "midTurnCompact";
 
+/** Pi's proper-lockfile-compatible adjacent lock directory suffix. */
+export const SETTINGS_LOCK_SUFFIX = ".lock";
+
+/** Keep lock contention bounded; Pi's own synchronous writer uses the same retry shape. */
+export const SETTINGS_LOCK_MAX_ATTEMPTS = 10;
+export const SETTINGS_LOCK_RETRY_DELAY_MS = 20;
+export const SETTINGS_LOCK_STALE_MS = 10_000;
+
+/** Exact Envoy local-reply text observed when a request cannot be buffered for an upstream retry. */
+export const RETRY_BUFFER_LIMIT_ERROR_TEXT = "exceeded request buffer limit while retrying upstream";
+
+/** Stable route identity for the Codex Responses transport; model IDs on the same route share a learned ceiling. */
+export function getCodexRequestRouteKey(model: ExtensionContext["model"]): string | null {
+	if (!model || model.provider !== "openai-codex" || model.api !== "openai-codex-responses") return null;
+	const baseUrl = typeof model.baseUrl === "string" ? model.baseUrl.replace(/\/+$/, "") : "<default>";
+	return `${model.provider}\u0000${model.api}\u0000${baseUrl}`;
+}
+
+/** UTF-8 size of the logical provider JSON, or null when the payload is not serializable. */
+export function getSerializedPayloadBytes(payload: unknown): number | null {
+	try {
+		const serialized = JSON.stringify(payload);
+		return serialized === undefined ? null : Buffer.byteLength(serialized, "utf8");
+	} catch {
+		return null;
+	}
+}
+
+/** Match only the specific Envoy retry-buffer failure, allowing provider prefixes around it. */
+export function isRetryBufferLimitError(errorMessage: unknown): boolean {
+	return typeof errorMessage === "string" && errorMessage.toLowerCase().includes(RETRY_BUFFER_LIMIT_ERROR_TEXT);
+}
+
+function formatLogicalByteCount(bytes: number): string {
+	const kibibytes = bytes / 1024;
+	return kibibytes >= 1024 ? `${(kibibytes / 1024).toFixed(2)} MiB` : `${kibibytes.toFixed(1)} KiB`;
+}
+
 export type MidTurnCompactStatus = {
 	enabled: boolean;
 	inFlight: boolean;
@@ -132,19 +182,150 @@ export type MidTurnCompactStatus = {
 };
 
 type ContinuationLease = symbol;
+type MidTurnBoundaryReason = "token-pressure" | "learned-request-size";
+type BoundaryState =
+	| { phase: "idle" }
+	| {
+			phase: "awaiting-settlement";
+			lease: ContinuationLease;
+			reason: MidTurnBoundaryReason;
+			contextWindowPercent: number;
+			compactionObserved: boolean;
+	  }
+	| {
+			phase: "awaiting-compact-callback";
+			lease: ContinuationLease;
+	  };
+type TrackedToolFollowupRequest = {
+	routeKey: string;
+	logicalBytes: number;
+};
+type RequestTracking = {
+	nextFollowsTools: boolean;
+	active?: TrackedToolFollowupRequest;
+};
 type JsonObject = Record<string, unknown>;
 
 function isJsonObject(value: unknown): value is JsonObject {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function hasErrorCode(error: unknown, code: string): boolean {
+	return typeof error === "object" && error !== null && "code" in error && error.code === code;
+}
+
 function isFileNotFound(error: unknown): boolean {
-	return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+	return hasErrorCode(error, "ENOENT");
+}
+
+function sleepSynchronously(delayMs: number): void {
+	const deadline = Date.now() + delayMs;
+	while (Date.now() < deadline) {
+		// Settings writes are synchronous already. Keep this bounded retry aligned
+		// with Pi's own short proper-lockfile contention loop.
+	}
 }
 
 /** Resolve Pi's global settings file, honoring PI_CODING_AGENT_DIR. */
 export function getMidTurnCompactSettingsPath(): string {
-	return join(getAgentDir(), "settings.json");
+	return resolve(join(getAgentDir(), "settings.json"));
+}
+
+/** Adjacent lock directory used by Pi's proper-lockfile-backed SettingsManager. */
+export function getMidTurnCompactSettingsLockPath(settingsPath: string = getMidTurnCompactSettingsPath()): string {
+	return `${settingsPath}${SETTINGS_LOCK_SUFFIX}`;
+}
+
+class SettingsLockReleaseError extends Error {
+	constructor(readonly releaseCause: unknown) {
+		super(`Pi settings were saved, but the settings lock could not be released: ${releaseCause instanceof Error ? releaseCause.message : String(releaseCause)}`);
+		this.name = "SettingsLockReleaseError";
+	}
+}
+
+function reclaimStaleSettingsLock(lockPath: string): boolean {
+	let lockStat;
+	try {
+		lockStat = statSync(lockPath);
+	} catch (error) {
+		if (isFileNotFound(error)) return true;
+		throw error;
+	}
+	if (lockStat.mtimeMs >= Date.now() - SETTINGS_LOCK_STALE_MS) return false;
+
+	try {
+		rmdirSync(lockPath);
+		return true;
+	} catch (error) {
+		if (isFileNotFound(error)) return true;
+		throw error;
+	}
+}
+
+function withSettingsLock<T>(settingsPath: string, operation: () => T): T {
+	const directory = dirname(settingsPath);
+	mkdirSync(directory, { recursive: true });
+	const lockPath = getMidTurnCompactSettingsLockPath(settingsPath);
+	let acquiredIdentity: { dev: number; ino: number } | undefined;
+	let lastError: unknown;
+	let contentionAttempts = 0;
+	let totalAttempts = 0;
+
+	while (
+		contentionAttempts < SETTINGS_LOCK_MAX_ATTEMPTS
+		&& totalAttempts < SETTINGS_LOCK_MAX_ATTEMPTS * 2
+	) {
+		totalAttempts += 1;
+		try {
+			// mkdir is the same atomic ownership primitive proper-lockfile uses.
+			mkdirSync(lockPath);
+		} catch (error) {
+			if (!hasErrorCode(error, "EEXIST")) throw error;
+			lastError = error;
+			if (reclaimStaleSettingsLock(lockPath)) continue;
+			contentionAttempts += 1;
+			if (contentionAttempts < SETTINGS_LOCK_MAX_ATTEMPTS) {
+				sleepSynchronously(SETTINGS_LOCK_RETRY_DELAY_MS);
+			}
+			continue;
+		}
+
+		try {
+			const lockStat = statSync(lockPath);
+			acquiredIdentity = { dev: lockStat.dev, ino: lockStat.ino };
+			break;
+		} catch (error) {
+			try {
+				rmdirSync(lockPath);
+			} catch {
+				// Preserve the ownership-probe failure; a later stale check can reclaim.
+			}
+			throw error;
+		}
+	}
+
+	if (!acquiredIdentity) {
+		const detail = lastError instanceof Error ? `: ${lastError.message}` : "";
+		throw new Error(`Pi settings are locked by another process${detail}`);
+	}
+
+	let operationFailed = false;
+	try {
+		return operation();
+	} catch (error) {
+		operationFailed = true;
+		throw error;
+	} finally {
+		try {
+			const currentIdentity = statSync(lockPath);
+			if (currentIdentity.dev !== acquiredIdentity.dev || currentIdentity.ino !== acquiredIdentity.ino) {
+				throw new Error("Pi settings lock ownership changed before release");
+			}
+			rmdirSync(lockPath);
+		} catch (error) {
+			if (!isFileNotFound(error) && !operationFailed) throw new SettingsLockReleaseError(error);
+		}
+	}
 }
 
 function readSettingsObject(settingsPath: string): JsonObject {
@@ -161,12 +342,14 @@ function readSettingsObject(settingsPath: string): JsonObject {
 /** Read the persisted preference; a missing or malformed preference defaults off. */
 export function readPersistedMidTurnCompactEnabled(settingsPath: string = getMidTurnCompactSettingsPath()): boolean {
 	try {
-		const settings = readSettingsObject(settingsPath);
-		const namespace = settings[PI_SETTINGS_NAMESPACE];
-		if (!isJsonObject(namespace)) return false;
-		const feature = namespace[MID_TURN_COMPACT_SETTINGS_KEY];
-		if (!isJsonObject(feature)) return false;
-		return feature.enabled === true;
+		return withSettingsLock(settingsPath, () => {
+			const settings = readSettingsObject(settingsPath);
+			const namespace = settings[PI_SETTINGS_NAMESPACE];
+			if (!isJsonObject(namespace)) return false;
+			const feature = namespace[MID_TURN_COMPACT_SETTINGS_KEY];
+			if (!isJsonObject(feature)) return false;
+			return feature.enabled === true;
+		});
 	} catch {
 		return false;
 	}
@@ -174,44 +357,32 @@ export function readPersistedMidTurnCompactEnabled(settingsPath: string = getMid
 
 /**
  * Persist only the extension-owned preference while preserving all other Pi
- * settings. The temp-file replacement prevents a partially-written settings
- * file if the process is interrupted during the write.
+ * settings. The read/merge/write participates in Pi's adjacent settings lock,
+ * and the in-place write follows symlinks instead of replacing their directory
+ * entries. Lock uncertainty fails closed and leaves the file untouched.
  */
 export function persistMidTurnCompactEnabled(
 	enabled: boolean,
 	settingsPath: string = getMidTurnCompactSettingsPath(),
 ): void {
-	const settings = readSettingsObject(settingsPath);
-	const currentNamespace = isJsonObject(settings[PI_SETTINGS_NAMESPACE]) ? settings[PI_SETTINGS_NAMESPACE] : {};
-	const currentFeature = isJsonObject(currentNamespace[MID_TURN_COMPACT_SETTINGS_KEY])
-		? currentNamespace[MID_TURN_COMPACT_SETTINGS_KEY]
-		: {};
-	settings[PI_SETTINGS_NAMESPACE] = {
-		...currentNamespace,
-		[MID_TURN_COMPACT_SETTINGS_KEY]: {
-			...currentFeature,
-			enabled,
-		},
-	};
+	withSettingsLock(settingsPath, () => {
+		// Re-read only after owning the lock so this merge starts from the latest
+		// complete settings written by every cooperating Pi process.
+		const settings = readSettingsObject(settingsPath);
+		const currentNamespace = isJsonObject(settings[PI_SETTINGS_NAMESPACE]) ? settings[PI_SETTINGS_NAMESPACE] : {};
+		const currentFeature = isJsonObject(currentNamespace[MID_TURN_COMPACT_SETTINGS_KEY])
+			? currentNamespace[MID_TURN_COMPACT_SETTINGS_KEY]
+			: {};
+		settings[PI_SETTINGS_NAMESPACE] = {
+			...currentNamespace,
+			[MID_TURN_COMPACT_SETTINGS_KEY]: {
+				...currentFeature,
+				enabled,
+			},
+		};
 
-	const directory = dirname(settingsPath);
-	mkdirSync(directory, { recursive: true });
-	const temporaryPath = join(directory, `.${basename(settingsPath)}.${process.pid}.${randomUUID()}.tmp`);
-	let mode: number | undefined;
-	if (existsSync(settingsPath)) mode = statSync(settingsPath).mode & 0o777;
-	try {
-		writeFileSync(temporaryPath, `${JSON.stringify(settings, null, 2)}\n`, {
-			encoding: "utf8",
-			...(mode === undefined ? {} : { mode }),
-		});
-		renameSync(temporaryPath, settingsPath);
-	} finally {
-		try {
-			unlinkSync(temporaryPath);
-		} catch (error) {
-			if (!isFileNotFound(error)) throw error;
-		}
-	}
+		writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+	});
 }
 
 /**
@@ -476,14 +647,15 @@ export function isOverSoftThreshold(
 }
 
 /**
- * Whether this turn_end should trigger mid-turn compact when enabled.
- * T1: only when tool results were produced (tools still need a follow-up sample).
+ * Whether a proven next turn following tool results should trigger mid-turn
+ * compact when enabled. `turn_start` proves that the tool batch did not
+ * terminate the run without waiting until provider request construction.
  * Exported for unit tests.
  */
 export function shouldTriggerMidTurnCompact(options: {
 	enabled: boolean;
 	inFlight: boolean;
-	toolResultCount: number;
+	followsTools: boolean;
 	tokens: number | null | undefined;
 	contextWindow: number | null | undefined;
 	reserveTokens?: number;
@@ -491,7 +663,7 @@ export function shouldTriggerMidTurnCompact(options: {
 }): boolean {
 	if (!options.enabled) return false;
 	if (options.inFlight) return false;
-	if (options.toolResultCount <= 0) return false;
+	if (!options.followsTools) return false;
 	return isOverSoftThreshold(
 		options.tokens,
 		options.contextWindow,
@@ -555,27 +727,32 @@ function notifyIfActive(
 }
 
 export default function midTurnCompact(pi: ExtensionAPI): void {
-	let enabled = readPersistedMidTurnCompactEnabled();
-	let inFlight = false;
+	const settingsPath = getMidTurnCompactSettingsPath();
+	let enabled = readPersistedMidTurnCompactEnabled(settingsPath);
 	let compactsThisRun = 0;
 	let contextWindowPercent = DEFAULT_CONTEXT_WINDOW_PERCENT;
-	let boundaryContextWindowPercent: number | undefined;
-	let continuationLease: ContinuationLease | undefined;
+	let boundary: BoundaryState = { phase: "idle" };
+	const requestTracking: RequestTracking = { nextFollowsTools: false };
+	const learnedRetryBufferCeilings = new Map<string, number>();
+
+	const clearRequestTracking = (): void => {
+		requestTracking.nextFollowsTools = false;
+		requestTracking.active = undefined;
+	};
 
 	const abandonActiveBoundary = (): void => {
-		continuationLease = undefined;
-		inFlight = false;
-		boundaryContextWindowPercent = undefined;
+		boundary = { phase: "idle" };
 	};
 
 	const resetRunCounters = (): void => {
 		abandonActiveBoundary();
+		clearRequestTracking();
 		compactsThisRun = 0;
 	};
 
 	const status = (): MidTurnCompactStatus => ({
 		enabled,
-		inFlight,
+		inFlight: boundary.phase !== "idle",
 		compactsThisRun,
 		contextWindowPercent,
 	});
@@ -588,9 +765,12 @@ export default function midTurnCompact(pi: ExtensionAPI): void {
 			effectiveContextWindow === null || advertisedContextWindow === null || advertisedContextWindow === undefined
 				? formatContextWindowPercent(s.contextWindowPercent)
 				: `${formatContextWindowPercent(s.contextWindowPercent)} (${Math.round(effectiveContextWindow)} effective from ${Math.round(advertisedContextWindow)})`;
+		const routeKey = getCodexRequestRouteKey(ctx.model);
+		const learnedCeiling = routeKey === null ? undefined : learnedRetryBufferCeilings.get(routeKey);
 		return [
 			`mid-turn-compact: ${s.enabled ? "enabled" : "disabled"}`,
 			`context window: ${windowStatus}`,
+			`Codex request guard: ${learnedCeiling === undefined ? "not learned" : formatLogicalByteCount(learnedCeiling)}`,
 			`in-flight: ${s.inFlight ? "yes" : "no"}`,
 			`compacts this interaction: ${s.compactsThisRun}`,
 		].join("; ");
@@ -617,17 +797,21 @@ export default function midTurnCompact(pi: ExtensionAPI): void {
 		pushFooterStatus(ctx);
 
 		try {
-			persistMidTurnCompactEnabled(enabled);
+			persistMidTurnCompactEnabled(enabled, settingsPath);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			notify(ctx, `Mid-turn compact changed for this session, but Pi config could not be saved: ${message}`, "error");
+			if (error instanceof SettingsLockReleaseError) {
+				notify(ctx, message, "warning");
+			} else {
+				notify(ctx, `Mid-turn compact changed for this session, but Pi config could not be saved: ${message}`, "error");
+			}
 		}
 
 		if (!announce) return;
 		notify(
 			ctx,
 			enabled
-				? "Mid-turn compact enabled. Soft threshold fires at turn_end when tools are pending."
+				? "Mid-turn compact enabled. Soft threshold fires when a proven tool follow-up turn starts."
 				: "Mid-turn compact disabled.",
 			"info",
 		);
@@ -664,7 +848,7 @@ export default function midTurnCompact(pi: ExtensionAPI): void {
 				{
 					id: "enabled",
 					label: "Enabled",
-					description: "Interrupt over-threshold tool loops, compact after settlement, and resume the task.",
+					description: "Interrupt an over-threshold tool loop only when its next model turn starts.",
 					currentValue: enabled ? "on" : "off",
 					values: ["off", "on"],
 				},
@@ -719,8 +903,8 @@ export default function midTurnCompact(pi: ExtensionAPI): void {
 		// Symbol identity is both an ownership check and a one-shot claim. An old
 		// callback cannot act after a branch/task replacement, run twice, or clear
 		// state belonging to a newer boundary.
-		if (continuationLease !== lease) return;
-		continuationLease = undefined;
+		if (boundary.phase === "idle" || boundary.lease !== lease) return;
+		boundary = { phase: "idle" };
 
 		// ctx.compact() is fire-and-forget. Its callback may arrive after a
 		// session replacement or reload, when both this ctx and the captured pi
@@ -738,12 +922,25 @@ export default function midTurnCompact(pi: ExtensionAPI): void {
 		notifyIfActive(ctx, note, "info");
 	};
 
-	const startMidTurnBoundary = (ctx: ExtensionContext): void => {
-		continuationLease = Symbol("mid-turn-compact-continuation");
-		inFlight = true;
-		boundaryContextWindowPercent = contextWindowPercent;
+	const startMidTurnBoundary = (
+		ctx: ExtensionContext,
+		reason: MidTurnBoundaryReason,
+		detail?: string,
+	): void => {
+		boundary = {
+			phase: "awaiting-settlement",
+			lease: Symbol("mid-turn-compact-continuation"),
+			reason,
+			contextWindowPercent,
+			compactionObserved: false,
+		};
+		clearRequestTracking();
 		compactsThisRun += 1;
-		notify(ctx, `Mid-turn compact boundary starting (#${compactsThisRun})…`, "info");
+		notify(
+			ctx,
+			`Mid-turn compact boundary starting (#${compactsThisRun})${detail ? `: ${detail}` : ""}…`,
+			"info",
+		);
 		// Interrupt before the next model sample, but do not race pi's post-run
 		// auto-compaction with a delayed manual compact. agent_settled runs only
 		// after pi has completed its retry/compaction lifecycle.
@@ -751,24 +948,33 @@ export default function midTurnCompact(pi: ExtensionAPI): void {
 	};
 
 	const compactAfterSettlement = (ctx: ExtensionContext): void => {
-		const lease = continuationLease;
 		// A branch/session/new-task boundary can revoke ownership before this
 		// settlement. Never reconstruct or resume an operation without its lease.
-		if (!lease) {
-			inFlight = false;
-			boundaryContextWindowPercent = undefined;
-			return;
-		}
+		if (boundary.phase !== "awaiting-settlement") return;
+		const {
+			lease,
+			reason,
+			contextWindowPercent: settledContextWindowPercent,
+			compactionObserved,
+		} = boundary;
 
-		// Consume this settlement before starting the fire-and-forget fallback.
-		// A compacted context reports tokens:null until its next assistant turn;
-		// that is evidence that pi already owned this forced boundary. Use the
-		// same scale that admitted the boundary even if settings changed meanwhile.
-		const settledContextWindowPercent = boundaryContextWindowPercent ?? contextWindowPercent;
-		inFlight = false;
-		boundaryContextWindowPercent = undefined;
+		// session_compact is direct evidence that pi already owned this forced
+		// boundary. Keep tokens:null as a compatibility fallback because context
+		// usage remains unknown until the next assistant turn. Token boundaries
+		// re-check their snapshotted scale; learned request-size boundaries require
+		// compaction even while token usage is still low.
 		const usage = ctx.getContextUsage();
-		if (!isOverSoftThreshold(usage?.tokens, usage?.contextWindow, DEFAULT_RESERVE_TOKENS, settledContextWindowPercent)) {
+		const piAlreadyCompacted = compactionObserved || usage?.tokens === null;
+		const requiresManualCompact =
+			!piAlreadyCompacted &&
+			(reason === "learned-request-size" ||
+				isOverSoftThreshold(
+					usage?.tokens,
+					usage?.contextWindow,
+					DEFAULT_RESERVE_TOKENS,
+					settledContextWindowPercent,
+				));
+		if (!requiresManualCompact) {
 			resumeTask(ctx, "Mid-turn compact done; resuming task.", lease);
 			return;
 		}
@@ -776,7 +982,8 @@ export default function midTurnCompact(pi: ExtensionAPI): void {
 		// Pi did not compact (most commonly because the new tool results, rather
 		// than the preceding assistant usage, crossed the threshold). Use its
 		// public manual boundary now that the agent is fully settled. Wire shape
-		// and call/result pairing under server compaction remain 0017's concern.
+		// and call/result pairing under server compaction remain pi-openai-server-compaction's concern.
+		boundary = { phase: "awaiting-compact-callback", lease };
 		ctx.compact({
 			onComplete: () => {
 				resumeTask(ctx, "Mid-turn compact done; resuming task.", lease);
@@ -793,6 +1000,7 @@ export default function midTurnCompact(pi: ExtensionAPI): void {
 	// or follow-up that has not reached before_agent_start yet. Preserve only this
 	// extension's own synthetic continuation.
 	pi.on("input", (event) => {
+		clearRequestTracking();
 		if (event.source !== "extension" || event.text !== MID_TURN_CONTINUE_PROMPT) {
 			abandonActiveBoundary();
 			compactsThisRun = 0;
@@ -803,6 +1011,7 @@ export default function midTurnCompact(pi: ExtensionAPI): void {
 	// also a fallback ownership boundary for host/programmatic paths that bypass
 	// the ordinary input event.
 	pi.on("before_agent_start", (event) => {
+		clearRequestTracking();
 		const prompt = typeof event.prompt === "string" ? event.prompt : "";
 		if (prompt !== MID_TURN_CONTINUE_PROMPT) {
 			abandonActiveBoundary();
@@ -811,6 +1020,7 @@ export default function midTurnCompact(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_start", (event, ctx) => {
+		learnedRetryBufferCeilings.clear();
 		resetRunCounters();
 		pushFooterStatus(ctx);
 	});
@@ -823,30 +1033,94 @@ export default function midTurnCompact(pi: ExtensionAPI): void {
 	pi.on("model_select", preserveLeaseAcrossConfigurationChange);
 	pi.on("thinking_level_select", preserveLeaseAcrossConfigurationChange);
 	pi.on("session_shutdown", (_event, ctx) => {
+		learnedRetryBufferCeilings.clear();
 		resetRunCounters();
 		clearFooterStatus(ctx);
 	});
 
 	pi.on("turn_end", (event: TurnEndEvent, ctx: ExtensionContext) => {
-		const usage = ctx.getContextUsage();
-		const toolResultCount = event.toolResults?.length ?? 0;
+		const completedRequest = requestTracking.active;
+		requestTracking.active = undefined;
 		if (
-			!shouldTriggerMidTurnCompact({
+			completedRequest
+			&& event.message.role === "assistant"
+			&& event.message.stopReason === "error"
+			&& isRetryBufferLimitError(event.message.errorMessage)
+		) {
+			const previousCeiling = learnedRetryBufferCeilings.get(completedRequest.routeKey);
+			const learnedCeiling = previousCeiling === undefined
+				? completedRequest.logicalBytes
+				: Math.min(previousCeiling, completedRequest.logicalBytes);
+			learnedRetryBufferCeilings.set(completedRequest.routeKey, learnedCeiling);
+			if (previousCeiling === undefined || learnedCeiling < previousCeiling) {
+				notify(
+					ctx,
+					`Mid-turn compact learned a ${formatLogicalByteCount(learnedCeiling)} Codex retry-buffer ceiling for this session. Future same-route tool follow-ups at or above it will compact before transport.`,
+					"warning",
+				);
+			}
+		}
+
+		const toolResultCount = event.toolResults?.length ?? 0;
+		// Tool results only arm the next turn. A terminating tool batch reaches
+		// agent_end without another turn_start, so it never crosses a boundary.
+		requestTracking.nextFollowsTools = toolResultCount > 0;
+	});
+
+	// This is the earliest public proof that Pi accepted another model turn
+	// after a tool batch. Aborting here preserves Pi's normal post-run threshold
+	// compaction path while avoiding a false abort for terminating tools.
+	pi.on("turn_start", (_event, ctx) => {
+		if (!requestTracking.nextFollowsTools || !enabled || boundary.phase !== "idle") return;
+		const usage = ctx.getContextUsage();
+		if (
+			shouldTriggerMidTurnCompact({
 				enabled,
-				inFlight,
-				toolResultCount,
+				inFlight: boundary.phase !== "idle",
+				followsTools: true,
 				tokens: usage?.tokens,
 				contextWindow: usage?.contextWindow,
 				contextWindowPercent,
 			})
 		) {
+			startMidTurnBoundary(ctx, "token-pressure");
+		}
+	});
+
+	// Clear a terminal tool batch's unused admission candidate. This does not
+	// revoke an already-started boundary; settlement still owns its exact lease.
+	pi.on("agent_end", clearRequestTracking);
+
+	pi.on("before_provider_request", (event, ctx) => {
+		const followsTools = requestTracking.nextFollowsTools;
+		requestTracking.nextFollowsTools = false;
+		requestTracking.active = undefined;
+		if (!followsTools || !enabled || boundary.phase !== "idle") return;
+
+		const routeKey = getCodexRequestRouteKey(ctx.model);
+		const logicalBytes = getSerializedPayloadBytes(event.payload);
+		if (routeKey === null || logicalBytes === null) return;
+
+		const learnedCeiling = learnedRetryBufferCeilings.get(routeKey);
+		if (learnedCeiling !== undefined && logicalBytes >= learnedCeiling) {
+			startMidTurnBoundary(
+				ctx,
+				"learned-request-size",
+				`Codex payload ${formatLogicalByteCount(logicalBytes)} reached the learned ${formatLogicalByteCount(learnedCeiling)} retry-buffer ceiling`,
+			);
 			return;
 		}
-		startMidTurnBoundary(ctx);
+
+		requestTracking.active = { routeKey, logicalBytes };
+	});
+
+	pi.on("session_compact", () => {
+		if (boundary.phase !== "awaiting-settlement") return;
+		boundary = { ...boundary, compactionObserved: true };
 	});
 
 	pi.on("agent_settled", (_event, ctx) => {
-		if (!inFlight) return;
+		if (boundary.phase !== "awaiting-settlement") return;
 		compactAfterSettlement(ctx);
 	});
 
