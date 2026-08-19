@@ -1,12 +1,11 @@
 /**
  * Standalone mirror of iamwrm/piagent-config
- * `packages/ren-public-package/0014-timeline.ts` (the source of truth, where it ships
- * with unit tests). Sibling helpers are inlined so this file can be copied
- * alone into agent_extensions.
+ * `packages/ren-public-package/0014-timeline.ts` (the source of truth, where it
+ * ships with tests). This vertical-only fullscreen timeline is self-contained
+ * and can be copied alone into agent_extensions.
  * Try it without installing: `pi -e ./0014-timeline.ts`
  *
- * Inlined: scrubTerminalSequences from 0013, plus timeline-fullscreen.ts.
-
+ * Inlined: scrubTerminalSequences from 0013 plus the fullscreen rail.
  */
 
 import {
@@ -168,7 +167,6 @@ const PROMPT_START = /^\x1b\]133;A(?:\x07|\x1b\\)/;
 
 export interface FullscreenTimelineTurn {
 	id: string;
-	text: string;
 	/** Exact text Pi's UserMessageComponent receives (text blocks concatenated). */
 	renderText: string;
 	preview: string;
@@ -803,7 +801,6 @@ export class FullscreenTimelineRuntime implements RuntimePatchController {
 	private available = false;
 	private failed = false;
 	private disposed = false;
-	private widgetTui: TUI | undefined;
 	private runtimeTui: RuntimeTui | undefined;
 	private theme: TimelineRuntimeTheme = PLAIN_RUNTIME_THEME;
 	private lastRail: VerticalTimelineRail | undefined;
@@ -826,13 +823,8 @@ export class FullscreenTimelineRuntime implements RuntimePatchController {
 		return this.available;
 	}
 
-	bindWidgetTui(tui: TUI, theme: TimelineRuntimeTheme): void {
-		this.widgetTui = tui;
+	setTheme(theme: TimelineRuntimeTheme): void {
 		this.theme = theme;
-	}
-
-	shouldHideWidget(_tui: TUI): boolean {
-		return this.hasActiveFullscreenRuntime() && this.lastRail !== undefined;
 	}
 
 	setVisible(visible: boolean): void {
@@ -872,31 +864,27 @@ export class FullscreenTimelineRuntime implements RuntimePatchController {
 	}
 
 	step(delta: number): boolean {
-		if (!this.visible || this.host.getTurns().length === 0) return false;
-		const turns = this.host.getTurns();
-		const fullscreen = this.hasActiveFullscreenRuntime() && this.lastRail !== undefined;
-		const base = fullscreen
-			? (this.keyboardFocus ?? this.lastSnapshot?.viewport.active ?? this.host.getSelected())
-			: this.host.getSelected();
-		let target: number;
-		if (fullscreen) {
-			let railIndex = this.lastRailTurnIndices.indexOf(base);
-			if (railIndex < 0) {
-				railIndex = this.lastRailTurnIndices.findIndex((turnIndex) => turnIndex >= base);
-				if (railIndex < 0) railIndex = this.lastRailTurnIndices.length - 1;
-			}
-			const targetRailIndex = Math.min(Math.max(0, railIndex + delta), this.lastRailTurnIndices.length - 1);
-			target = this.lastRailTurnIndices[targetRailIndex] ?? base;
-		} else {
-			target = Math.min(Math.max(0, base + delta), turns.length - 1);
+		if (
+			!this.visible ||
+			!this.hasActiveFullscreenRuntime() ||
+			!this.lastRail ||
+			this.lastRailTurnIndices.length === 0
+		) {
+			return false;
 		}
+		const base = this.keyboardFocus ?? this.lastSnapshot?.viewport.active ?? this.host.getSelected();
+		let railIndex = this.lastRailTurnIndices.indexOf(base);
+		if (railIndex < 0) {
+			railIndex = this.lastRailTurnIndices.findIndex((turnIndex) => turnIndex >= base);
+			if (railIndex < 0) railIndex = this.lastRailTurnIndices.length - 1;
+		}
+		const targetRailIndex = Math.min(Math.max(0, railIndex + delta), this.lastRailTurnIndices.length - 1);
+		const target = this.lastRailTurnIndices[targetRailIndex] ?? base;
 		this.host.select(target);
-		if (fullscreen) {
-			this.mouseHover = undefined;
-			this.lastMouse = undefined;
-			this.keyboardFocus = target;
-			this.jumpToTurn(target);
-		}
+		this.mouseHover = undefined;
+		this.lastMouse = undefined;
+		this.keyboardFocus = target;
+		this.jumpToTurn(target);
 		this.requestRender();
 		return true;
 	}
@@ -979,7 +967,7 @@ export class FullscreenTimelineRuntime implements RuntimePatchController {
 			this.lastRailTurnIndices = [];
 			this.restoreScrollbars();
 			this.lastCompositeSignature = "";
-			this.requestWidgetLayoutConvergence(hadRail);
+			this.requestRailLayoutConvergence(hadRail);
 			return lines;
 		}
 		const snapshot = readViewportSnapshot(tui, turns);
@@ -990,7 +978,7 @@ export class FullscreenTimelineRuntime implements RuntimePatchController {
 			this.lastRailTurnIndices = [];
 			this.restoreScrollbars();
 			this.lastCompositeSignature = snapshot?.signature ?? "";
-			this.requestWidgetLayoutConvergence(hadRail);
+			this.requestRailLayoutConvergence(hadRail);
 			return lines;
 		}
 
@@ -1006,13 +994,13 @@ export class FullscreenTimelineRuntime implements RuntimePatchController {
 			this.lastRailTurnIndices = [];
 			this.restoreScrollbars();
 			this.lastCompositeSignature = snapshot.signature;
-			this.requestWidgetLayoutConvergence(hadRail);
+			this.requestRailLayoutConvergence(hadRail);
 			return lines;
 		}
 		this.lastRail = rail;
 		this.lastRailTurnIndices = railTurnIndices;
 		this.lastCompositeSignature = snapshot.signature;
-		this.requestWidgetLayoutConvergence(hadRail);
+		this.requestRailLayoutConvergence(hadRail);
 
 		if (this.lastMouse) {
 			const overTimeline =
@@ -1071,7 +1059,6 @@ export class FullscreenTimelineRuntime implements RuntimePatchController {
 		this.restoreScrollbars();
 		if (this.installed) uninstallRuntimePatch(this);
 		this.runtimeTui = undefined;
-		this.widgetTui = undefined;
 	}
 
 	private jumpToTurn(turnIndex: number): void {
@@ -1134,37 +1121,28 @@ export class FullscreenTimelineRuntime implements RuntimePatchController {
 		return false;
 	}
 
-	private requestWidgetLayoutConvergence(hadRail: boolean): void {
+	private requestRailLayoutConvergence(hadRail: boolean): void {
 		if (hadRail === (this.lastRail !== undefined)) return;
-		// The widget rendered into the current LayoutFrame before composite()
-		// learned whether the previous frame supports the fullscreen rail. Repaint
-		// once so the dock drops or restores the horizontal fallback immediately.
+		// Scrollbar ownership changes after Pi has already rendered the base frame.
+		// Repaint once so the native scrollbar disappears or returns immediately.
 		this.requestRender();
 	}
 
-	private requestRender(): void {
-		for (const tui of new Set([this.runtimeTui, this.widgetTui])) {
-			if (!tui) continue;
-			try {
-				tui.requestRender();
-			} catch {
-				// Try the other renderer; mode switches detach the old one.
-			}
+	requestRender(): void {
+		if (!this.runtimeTui) return;
+		try {
+			this.runtimeTui.requestRender();
+		} catch {
+			// Renderer switches detach the old TUI; the next frame binds the new one.
 		}
 	}
 }
 
-/** Most wrapped prompt lines shown before the overflow marker. */
-export const MAX_PROMPT_LINES = 8;
-
-/** Keyboard hint shown right-aligned on the rail row when it fits. */
-export const RAIL_HINT = "alt+, / alt+. · /timeline";
-
 /**
  * User prompts are plain text, not trusted styled output. Remove every
  * terminal sequence and C0/C1 control while preserving line breaks and tabs;
- * normalize CR/CRLF to LF so carriage returns cannot overprint the widget.
- * Exported for smoke tests.
+ * normalize CR/CRLF to LF so carriage returns cannot overprint a preview.
+ * Exported for tests.
  */
 export function sanitizePromptText(text: string): string {
 	return scrubTerminalSequences(text)
@@ -1200,7 +1178,6 @@ export function extractTimelineTurns(entries: readonly SessionEntry[]): Fullscre
 		const entryId = (entry as { id?: unknown }).id;
 		turns.push({
 			id: typeof entryId === "string" ? entryId : `turn:${turns.length}`,
-			text,
 			renderText: projections.rendered,
 			preview: timelinePromptPreview(text),
 		});
@@ -1208,91 +1185,12 @@ export function extractTimelineTurns(entries: readonly SessionEntry[]): Fullscre
 	return turns;
 }
 
-/**
- * Complete sanitized text for each turn (= each user message entry), in
- * branch order. Steering/follow-up user messages count as turns, matching
- * how they start a new prompt boundary elsewhere (e.g. 0012-last-turn).
- * Exported for smoke tests.
- */
-export function extractTurnTexts(entries: readonly SessionEntry[]): string[] {
-	return extractTimelineTurns(entries).map((turn) => turn.text);
-}
-
-/**
- * Tick window over the turns, grok's `compute_rail` windowing: everything
- * when it fits, else a `maxTicks`-wide slice roughly centered on the
- * selection and clamped to the tail. Exported for smoke tests.
- */
-export function tickWindow(turnCount: number, selected: number, maxTicks: number): { start: number; end: number } {
-	if (maxTicks <= 0 || turnCount <= 0) return { start: 0, end: 0 };
-	if (turnCount <= maxTicks) return { start: 0, end: turnCount };
-	const tailStart = turnCount - maxTicks;
-	const start = Math.min(Math.max(0, selected - Math.floor(maxTicks / 2)), tailStart);
-	return { start, end: start + maxTicks };
-}
-
-/** Styling seams so the pure renderer is testable without a Theme. */
-export interface TimelineStyles {
-	dim(text: string): string;
-	accent(text: string): string;
-}
-
-/** Identity styles for tests and plain rendering. Exported for smoke tests. */
-export const PLAIN_STYLES: TimelineStyles = { dim: (t) => t, accent: (t) => t };
-
-/**
- * Render the widget for `width` columns. Row 1 is the tick rail (chevrons
- * dim at end stops — the same "dim means no-op" rule grok enforces), row 2
- * is `selected/total`, and subsequent rows preserve and wrap the complete
- * prompt. Exported for smoke tests.
- */
-export function renderTimelineLines(
-	turns: readonly string[],
-	selected: number,
-	width: number,
-	styles: TimelineStyles = PLAIN_STYLES,
-): string[] {
-	const safeWidth = Math.max(1, width);
-	if (turns.length === 0) {
-		return [truncateToWidth(styles.dim("timeline: no turns yet \u2014 /timeline to hide"), safeWidth)];
-	}
-	const sel = Math.min(Math.max(0, selected), turns.length - 1);
-
-	// Rail: "‹ " + ticks + " ›", ticks windowed to the remaining columns.
-	const maxTicks = Math.max(1, width - 4);
-	const { start, end } = tickWindow(turns.length, sel, maxTicks);
-	let ticks = "";
-	for (let i = start; i < end; i++) {
-		ticks += i === sel ? styles.accent("\u25cf") : styles.dim("\u00b7");
-	}
-	const left = sel > 0 ? "\u2039" : styles.dim("\u2039");
-	const right = sel < turns.length - 1 ? "\u203a" : styles.dim("\u203a");
-	let rail = `${left} ${ticks} ${right}`;
-	const railWidth = 4 + (end - start);
-	const pad = width - railWidth - RAIL_HINT.length;
-	if (pad >= 2) rail += " ".repeat(pad) + styles.dim(RAIL_HINT);
-	if (visibleWidth(rail) > width) rail = truncateToWidth(rail, safeWidth);
-
-	const header = truncateToWidth(styles.accent(`${sel + 1}/${turns.length}`), safeWidth);
-	const prompt = turns[sel];
-	const wrapped = prompt.trim().length > 0 ? wrapTextWithAnsi(prompt, safeWidth) : [styles.dim("(no text)")];
-	const shown = wrapped.slice(0, MAX_PROMPT_LINES);
-	const remaining = wrapped.length - shown.length;
-	if (remaining > 0) shown.push(truncateToWidth(styles.dim(`\u2026 ${remaining} more lines`), safeWidth));
-
-	return width < 10 ? [header, ...shown] : [rail, header, ...shown];
-}
-
-const WIDGET_KEY = "timeline";
-
 export default function timelineExtension(pi: ExtensionAPI) {
 	let visible = true;
 	let turns: FullscreenTimelineTurn[] = [];
 	let selected = 0;
 	/** Selection is pinned to the newest turn; new turns keep it there. */
 	let followTail = true;
-	/** TUI captured by the widget factory; used to repaint after stepping. */
-	let tui: TUI | null = null;
 	const runtime = new FullscreenTimelineRuntime({
 		getTurns: () => turns,
 		getSelected: () => selected,
@@ -1302,15 +1200,6 @@ export default function timelineExtension(pi: ExtensionAPI) {
 			followTail = selected === turns.length - 1;
 		},
 	});
-
-	const requestRender = () => {
-		try {
-			tui?.requestRender();
-		} catch {
-			// TUI torn down under us; the widget is gone with it.
-			tui = null;
-		}
-	};
 
 	/** Recompute turns from the active branch and re-apply follow/clamp rules. */
 	const refresh = (ctx: ExtensionContext) => {
@@ -1330,62 +1219,36 @@ export default function timelineExtension(pi: ExtensionAPI) {
 	const show = (ctx: ExtensionContext) => {
 		visible = true;
 		refresh(ctx);
-		if (ctx.mode === "tui") runtime.enable();
+		if (ctx.mode !== "tui") return;
+		const theme = ctx.ui.theme;
+		runtime.setTheme({
+			dim: (text) => theme.fg("dim", text),
+			accent: (text) => theme.fg("accent", text),
+			text: (text) => theme.fg("text", text),
+			panel: (text) => theme.bg("customMessageBg", text),
+		});
+		runtime.enable();
 		runtime.setVisible(true);
-		ctx.ui.setWidget(
-			WIDGET_KEY,
-			(widgetTui, theme) => {
-				tui = widgetTui;
-				const styles: TimelineStyles = {
-					dim: (t) => theme.fg("dim", t),
-					accent: (t) => theme.fg("accent", t),
-				};
-				const runtimeTheme: TimelineRuntimeTheme = {
-					...styles,
-					text: (t) => theme.fg("text", t),
-					panel: (t) => theme.bg("customMessageBg", t),
-				};
-				runtime.bindWidgetTui(widgetTui, runtimeTheme);
-				return {
-					render: (width: number) =>
-						runtime.shouldHideWidget(widgetTui)
-							? []
-							: renderTimelineLines(
-									turns.map((turn) => turn.text),
-									selected,
-									width,
-									styles,
-								),
-					invalidate: () => {},
-					dispose: () => {
-						if (tui === widgetTui) tui = null;
-					},
-				};
-			},
-			{ placement: "belowEditor" },
-		);
 	};
 
-	const hide = (ctx: ExtensionContext) => {
+	const hide = () => {
 		visible = false;
 		runtime.setVisible(false);
-		tui = null;
-		ctx.ui.setWidget(WIDGET_KEY, undefined, { placement: "belowEditor" });
 	};
 
 	const step = (delta: number) => {
-		if (runtime.step(delta)) requestRender();
+		runtime.step(delta);
 	};
 
 	const refreshIfVisible = (ctx: ExtensionContext) => {
 		if (!visible) return;
 		refresh(ctx);
-		requestRender();
+		runtime.requestRender();
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
 		if (!visible) return;
-		if (ctx.hasUI) show(ctx);
+		if (ctx.mode === "tui") show(ctx);
 		else refresh(ctx);
 	});
 	pi.on("session_tree", async (_event, ctx) => refreshIfVisible(ctx));
@@ -1396,7 +1259,6 @@ export default function timelineExtension(pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => {
 		visible = false;
 		runtime.dispose();
-		tui = null;
 		turns = [];
 		selected = 0;
 		followTail = true;
@@ -1412,10 +1274,10 @@ export default function timelineExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("timeline", {
-		description: "Toggle the default-on conversation timeline (alt+, / alt+. step turns)",
+		description: "Toggle the default-on vertical fullscreen timeline (alt+, / alt+. step turns)",
 		handler: async (_args, ctx: ExtensionContext) => {
-			if (!ctx.hasUI) return;
-			if (visible) hide(ctx);
+			if (ctx.mode !== "tui") return;
+			if (visible) hide();
 			else show(ctx);
 		},
 	});
