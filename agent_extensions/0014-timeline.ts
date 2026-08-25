@@ -5,13 +5,14 @@
  * and can be copied alone into agent_extensions.
  * Try it without installing: `pi -e ./0014-timeline.ts`
  *
- * Inlined: scrubTerminalSequences from 0013 plus the fullscreen rail.
+ * Inlined: scrubTerminalSequences from 0013 plus the fullscreen rail. Private
+ * seams were most recently validated on Pi 0.84.3; compatible later runtimes
+ * are admitted by runtime-shape checks and still fail closed on anomalies.
  */
 
 import {
 	AssistantMessageComponent,
 	UserMessageComponent,
-	VERSION,
 	type ExtensionAPI,
 	type ExtensionContext,
 	type SessionEntry,
@@ -152,7 +153,6 @@ export function scrubTerminalSequences(input: string): string {
 	return out;
 }
 
-export const SUPPORTED_TIMELINE_PI_VERSION = "0.84.2";
 export const TIMELINE_MIN_TERMINAL_WIDTH = 30;
 export const TIMELINE_RAIL_WIDTH = 2;
 export const TIMELINE_LATEST_CONTROL_WIDTH = 13;
@@ -344,7 +344,7 @@ function safelyCrash(controller: RuntimePatchController | undefined): void {
 }
 
 function installRuntimePatch(controller: RuntimePatchController): boolean {
-	if (process.env.PI_TIMELINE_FULLSCREEN_PATCH === "0" || VERSION !== SUPPORTED_TIMELINE_PI_VERSION) return false;
+	if (process.env.PI_TIMELINE_FULLSCREEN_PATCH === "0") return false;
 
 	const state = globalPatchState();
 	state.controllers.add(controller);
@@ -651,8 +651,8 @@ function semanticComponents(component: Component | undefined, output: SemanticCo
 	}
 	if (component instanceof AssistantMessageComponent) {
 		// AssistantMessageComponent deliberately omits its OSC 133 zone when it
-		// owns tool calls (and when it renders no lines). Mirror that private,
-		// exact-version behavior or the next user marker would be misclassified.
+		// owns tool calls (and when it renders no lines). Mirror that validated
+		// private behavior or the next user marker would be misclassified.
 		const assistant = component as unknown as {
 			hasToolCalls?: unknown;
 			contentContainer?: { children?: unknown };

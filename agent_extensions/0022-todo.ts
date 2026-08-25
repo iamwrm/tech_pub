@@ -5,15 +5,15 @@
  * alone into agent_extensions.
  * Try it without installing: `pi -e ./0022-todo.ts`
  *
- * Inlined: todo-hud.ts and todo-hud-fullscreen.ts.
-
+ * Inlined: todo-hud.ts and todo-hud-fullscreen.ts. Private seams were most
+ * recently validated on Pi 0.84.3; compatible later runtimes are admitted by
+ * runtime-shape checks and still fail closed on anomalies.
  */
 
 import {
 	StringEnum,
 } from "@earendil-works/pi-ai";
 import {
-	VERSION,
 	type ExtensionAPI,
 	type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
@@ -1134,7 +1134,6 @@ export class TodoHudComponent implements Component {
 	}
 }
 
-export const SUPPORTED_TODO_HUD_PI_VERSION = "0.84.2";
 const PATCH_KEY = Symbol.for("ren-public-package.todo-hud-fullscreen.patch.v1");
 const RENDER_PATCH_KEY = Symbol.for("ren-public-package.todo-hud-fullscreen.renderPatch.v1");
 
@@ -1233,7 +1232,7 @@ function safelyCrash(controller: TodoPointerController | undefined): void {
 }
 
 function installRuntimePatch(controller: TodoPointerController): boolean {
-	if (process.env.PI_TODO_HUD_FULLSCREEN_PATCH === "0" || VERSION !== SUPPORTED_TODO_HUD_PI_VERSION) return false;
+	if (process.env.PI_TODO_HUD_FULLSCREEN_PATCH === "0") return false;
 	const state = globalPatchState();
 	state.controllers.add(controller);
 	if (state.patched) return true;
@@ -1326,7 +1325,7 @@ function activeRenderController(state: RenderPatchState): TodoRenderController |
  * always restored.
  */
 function installRenderPatch(controller: TodoRenderController): boolean {
-	if (process.env.PI_TODO_HUD_RENDER_PATCH === "0" || VERSION !== SUPPORTED_TODO_HUD_PI_VERSION) return false;
+	if (process.env.PI_TODO_HUD_RENDER_PATCH === "0") return false;
 	const state = globalRenderPatchState();
 	state.controllers.add(controller);
 	if (state.patched) return true;
