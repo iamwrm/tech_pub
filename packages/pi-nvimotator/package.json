@@ -1,0 +1,56 @@
+{
+  "name": "pi-nvimotator",
+  "version": "0.1.0",
+  "description": "Pi extension and Neovim plugin for annotating the latest assistant message from any same-host shell.",
+  "private": true,
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "extension",
+    "neovim",
+    "annotations",
+    "plannotator"
+  ],
+  "files": [
+    "index.ts",
+    "src",
+    "plugin",
+    "lua",
+    "doc",
+    "tests",
+    "README.md",
+    "Changelog.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test:ts": "tsx --test tests/*.test.ts",
+    "test:nvim": "bash tests/nvim-headless.sh",
+    "test": "npm run check && npm run test:ts && npm run test:nvim",
+    "test:e2e": "bash tests/tmux-e2e.sh"
+  },
+  "pi": {
+    "extensions": [
+      "index.ts"
+    ]
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "dependencies": {
+    "@plannotator/pi-extension": "0.27.8"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.84.3",
+    "@earendil-works/pi-coding-agent": "^0.84.3",
+    "@types/node": "^24.0.0",
+    "tsx": "latest",
+    "typescript": "latest"
+  }
+}
