@@ -21,6 +21,7 @@ local registry = require("pi_nvimotator.registry")
 
 ok(vim.fn.exists(":NvimotatorAttach") == 2, "plugin commands were not loaded")
 ok(vim.fn.maparg("\\ng", "n") ~= "", "global-comment leader mapping was not installed")
+ok(vim.fn.maparg("\\nt", "n") ~= "", "attach leader mapping was not installed")
 eq(vim.g.pi_nvimotator_owns_registrations, 1, "plugin registration ownership marker")
 vim.g.loaded_pi_nvimotator = nil
 vim.g.pi_nvimotator_owns_registrations = nil
@@ -28,6 +29,7 @@ vim.cmd("runtime plugin/pi_nvimotator.lua")
 ok(vim.fn.exists(":NvimotatorAttach") == 2, "legacy registration reload keeps commands")
 ok(vim.fn.maparg("<Plug>(NvimotatorQuick)", "n") ~= "", "legacy registration reload keeps Plug mappings")
 eq(vim.g.pi_nvimotator_owns_registrations, 1, "legacy reload claims registrations")
+ok(vim.fn.maparg("<Plug>(NvimotatorAttach)", "n") ~= "", "legacy registration reload keeps attach Plug mapping")
 vim.g.loaded_pi_nvimotator = nil
 vim.cmd("runtime plugin/pi_nvimotator.lua")
 ok(vim.fn.exists(":NvimotatorAttach") == 2, "owned repeated source keeps commands")
@@ -168,6 +170,22 @@ eq(selected_overview_action, "clear", "comments overview clear-all action")
 eq(selected_overview_record, nil, "clear-all is not tied to one annotation")
 
 local nvimotator = require("pi_nvimotator")
+local original_input = vim.ui.input
+local original_attach = nvimotator.attach
+local prompted_id
+vim.ui.input = function(options, callback)
+  eq(options.prompt, "Nvimotator bridge ID: ", "attach prompt")
+  callback(" 16 ")
+end
+nvimotator.attach = function(value) prompted_id = value end
+nvimotator.attach_prompt()
+eq(prompted_id, "16", "prompted attach trims and forwards the bridge ID")
+prompted_id = nil
+vim.ui.input = function(_, callback) callback(nil) end
+nvimotator.attach_prompt()
+eq(prompted_id, nil, "cancelled attach prompt does nothing")
+nvimotator.attach = original_attach
+vim.ui.input = original_input
 local nvimotator_state = nvimotator._state()
 nvimotator_state.phase = "ready"
 nvimotator_state.store = store
@@ -236,7 +254,7 @@ local registry_dir = assert(vim.env.PI_NVIMOTATOR_REGISTRY)
 vim.fn.mkdir(registry_dir, "p", 448)
 uv.fs_chmod(registry_dir, 448)
 local manifest = {
-  protocolVersion = 1,
+  protocolVersion = 2,
   bridgeId = 16,
   instanceId = "instance-headless",
   sessionId = "session-headless",
@@ -244,11 +262,15 @@ local manifest = {
   entryId = "entry-headless",
   messageHash = string.rep("a", 64),
   pid = vim.fn.getpid(),
-  host = "127.0.0.1",
-  port = 32123,
+  transport = "unix",
+  socketPath = vim.fs.joinpath(registry_dir, "16.sock"),
   token = "secret-token",
   startedAt = "2026-01-01T00:00:00.000Z",
 }
+local live_pipe = assert(uv.new_pipe(false))
+assert(live_pipe:bind(manifest.socketPath))
+assert(live_pipe:listen(1, function() end))
+uv.fs_chmod(manifest.socketPath, 384)
 local manifest_path = vim.fs.joinpath(registry_dir, "16.json")
 vim.fn.writefile({ vim.json.encode(manifest) }, manifest_path, "b")
 uv.fs_chmod(manifest_path, 384)
@@ -259,6 +281,11 @@ eq(select(1, registry.lookup("016")), nil, "noncanonical registry ID")
 
 manifest.bridgeId = 17
 manifest.pid = 99999999
+manifest.socketPath = vim.fs.joinpath(registry_dir, "17.sock")
+local stale_pipe = assert(uv.new_pipe(false))
+assert(stale_pipe:bind(manifest.socketPath))
+assert(stale_pipe:listen(1, function() end))
+uv.fs_chmod(manifest.socketPath, 384)
 local stale_path = vim.fs.joinpath(registry_dir, "17.json")
 vim.fn.writefile({ vim.json.encode(manifest) }, stale_path, "b")
 uv.fs_chmod(stale_path, 384)
@@ -266,5 +293,25 @@ local stale, stale_error = registry.lookup("17")
 eq(stale, nil, "stale pid rejected")
 ok(stale_error:match("not running"), "stale pid error")
 eq(uv.fs_lstat(stale_path), nil, "stale manifest removed")
+eq(uv.fs_lstat(manifest.socketPath), nil, "stale Unix socket removed")
+stale_pipe:close()
 
+manifest.protocolVersion = 1
+manifest.bridgeId = 18
+manifest.pid = vim.fn.getpid()
+manifest.transport = nil
+manifest.socketPath = nil
+manifest.host = "127.0.0.1"
+manifest.port = 32123
+local legacy_path = vim.fs.joinpath(registry_dir, "18.json")
+vim.fn.writefile({ vim.json.encode(manifest) }, legacy_path, "b")
+uv.fs_chmod(legacy_path, 384)
+local legacy, legacy_error = registry.lookup("18")
+eq(legacy, nil, "live legacy protocol rejected")
+ok(legacy_error:match("protocol 1"), "legacy protocol migration guidance")
+ok(uv.fs_lstat(legacy_path), "live legacy manifest is not deleted")
+uv.fs_unlink(legacy_path)
+
+live_pipe:close()
+pcall(uv.fs_unlink, vim.fs.joinpath(registry_dir, "16.sock"))
 print("pi-nvimotator headless tests passed")

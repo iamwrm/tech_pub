@@ -5,6 +5,7 @@ local command_names = {
   "NvimotatorComments", "NvimotatorExport", "NvimotatorSend", "NvimotatorClear",
 }
 local plug_keys = {
+  { mode = "n", lhs = "<Plug>(NvimotatorAttach)" },
   { mode = "n", lhs = "<Plug>(NvimotatorAnnotate)" },
   { mode = "x", lhs = "<Plug>(NvimotatorAnnotate)" },
   { mode = "n", lhs = "<Plug>(NvimotatorQuick)" },
@@ -83,6 +84,7 @@ command("NvimotatorSend", function() nvimotator.send() end)
 command("NvimotatorClear", function() nvimotator.clear() end)
 
 local plugs = {
+  { mode = "n", lhs = "<Plug>(NvimotatorAttach)", rhs = function() nvimotator.attach_prompt() end },
   { mode = "n", lhs = "<Plug>(NvimotatorAnnotate)", rhs = function()
     local line = vim.api.nvim_win_get_cursor(0)[1]
     nvimotator.annotate_range(line, line)
@@ -107,6 +109,7 @@ end
 
 if vim.g.pi_nvimotator_disable_default_mappings ~= true then
   local defaults = {
+    { mode = "n", lhs = "<leader>nt", rhs = "<Plug>(NvimotatorAttach)" },
     { mode = "n", lhs = "<leader>na", rhs = "<Plug>(NvimotatorAnnotate)" },
     { mode = "x", lhs = "<leader>na", rhs = "<Plug>(NvimotatorAnnotate)" },
     { mode = "n", lhs = "<leader>nq", rhs = "<Plug>(NvimotatorQuick)" },

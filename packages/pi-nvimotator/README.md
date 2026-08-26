@@ -12,14 +12,17 @@ Lifecycle and design: [`IV-0027`](../../docs/IV-DC/IV-0027-pi-nvimotator.md).
 - Pi 0.84.3 or newer
 - Node.js 22.19 or newer
 - Neovim 0.10 or newer. Current kickstart.nvim uses `vim.pack` and needs 0.12.
+- Linux, macOS, or another POSIX host with Unix-domain sockets. Native Windows
+  is rejected rather than falling back to a host-wide TCP listener.
 - Same machine and OS account for Pi and Neovim
 - `git` and `make` (kickstart clones plugins and builds `telescope-fzf-native`)
 
 ## Install
 
 If you are starting from scratch, do these in order: mise, Neovim 0.12, latest
-kickstart.nvim, then this package. The Pi extension creates bridges. The
-Neovim plugin provides `:NvimotatorAttach` and the annotation UI.
+kickstart.nvim, then this package. The Pi extension creates an owner-only Unix
+socket. The Neovim plugin provides `:NvimotatorAttach`, `<leader>nt`, and the
+annotation UI.
 
 ### 1. Install mise
 
@@ -138,9 +141,10 @@ Run the command from any directory on the same host. The Neovim installation
 above makes `:NvimotatorAttach` available, and the command opens the captured
 assistant message as an immutable Markdown scratch buffer.
 
-| Neovim command | Action |
+| Neovim command or mapping | Action |
 | --- | --- |
 | `:NvimotatorAttach <id>` | Attach by explicit numeric locator without inspecting or changing cwd. |
+| `<leader>nt` | Prompt for a numeric locator and attach without leaving Neovim. |
 | `:[range]NvimotatorAnnotate` | Add a free-form comment to the current line or Ex range. |
 | `:[range]NvimotatorQuick` | Add `Deletion`, `Looks good`, or one of Plannotator's ten default quick labels to the current line/range. |
 | `:NvimotatorComment` | Add an unanchored general comment. |
@@ -176,6 +180,7 @@ Default mappings are installed only when the left-hand side and matching
 
 | Mode | Mapping | Action |
 | --- | --- | --- |
+| Normal | `<leader>nt` | Prompt for a numeric locator and attach. |
 | Normal/visual | `<leader>na` | Free-form annotation |
 | Normal/visual | `<leader>nq` | Quick action |
 | Normal | `<leader>ng` | Add an unanchored global comment |
@@ -186,7 +191,7 @@ Set `vim.g.pi_nvimotator_disable_default_mappings = true` before plugin load to
 use only the provided `<Plug>` mappings.
 
 Characterwise and linewise visual selections are supported. Blockwise visual
-mode is deliberately rejected in 0.1.0.
+mode is deliberately rejected.
 
 ## Semantics and limits
 
@@ -201,15 +206,22 @@ mode is deliberately rejected in 0.1.0.
 - A successful bridge acknowledgement means Pi accepted the synchronous
   scheduling call. Pi's public API does not prove durable transcript
   persistence, and deduplication lasts only for the live bridge.
-- The transport binds only `127.0.0.1`; registry and draft files are owner-only
-  on POSIX. The numeric locator is not a secret. Authentication tokens never
-  enter buffers, drafts, clipboard output, or notifications.
+- The transport uses an authenticated Unix-domain socket inside the owner-only
+  registry directory. The directory is mode `0700`; manifests and sockets are
+  mode `0600`. Other OS users cannot traverse to or connect to the socket. Root
+  and processes running as the same UID remain inside the trust boundary. The
+  numeric locator is not a secret. Authentication tokens never enter buffers,
+  drafts, clipboard output, or notifications.
 
-Override the shared registry directory for both processes with:
+Override the shared registry and Unix-socket directory for both processes with
+an absolute, short, owner-only path:
 
 ```bash
 export PI_NVIMOTATOR_REGISTRY="$HOME/.cache/pi-nvimotator/registry"
 ```
+
+Unix socket paths have a platform byte limit. Nvimotator rejects paths over 100
+bytes with an actionable error rather than silently falling back to TCP.
 
 ## Development
 

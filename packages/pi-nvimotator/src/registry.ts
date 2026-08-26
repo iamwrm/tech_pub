@@ -2,10 +2,16 @@ import { randomInt } from "node:crypto";
 import { chmod, link, lstat, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { MAX_BRIDGE_ID, MAX_MANIFEST_BYTES, type BridgeManifest } from "./protocol.ts";
+import { MAX_BRIDGE_ID, MAX_MANIFEST_BYTES, MAX_UNIX_SOCKET_PATH_BYTES, type BridgeManifest } from "./protocol.ts";
 
 const DIRECTORY_MODE = 0o700;
 const FILE_MODE = 0o600;
+
+export interface SocketIdentity {
+  path: string;
+  dev: number;
+  ino: number;
+}
 
 export interface RegistryReservation {
   bridgeId: number;
@@ -35,6 +41,61 @@ export async function ensureRegistryDirectory(): Promise<string> {
   await mkdir(directory, { recursive: true, mode: DIRECTORY_MODE });
   await assertPrivateDirectory(directory);
   return directory;
+}
+
+export function bridgeSocketPath(directory: string, bridgeId: number): string {
+  const path = join(directory, `${bridgeId}.sock`);
+  if (Buffer.byteLength(path) > MAX_UNIX_SOCKET_PATH_BYTES) {
+    throw new Error(
+      `Nvimotator Unix socket path is too long (${Buffer.byteLength(path)} bytes); set PI_NVIMOTATOR_REGISTRY to a shorter owner-only path.`,
+    );
+  }
+  return path;
+}
+
+function assertOwnedSocket(stat: Awaited<ReturnType<typeof lstat>>, path: string): void {
+  if (!stat.isSocket() || stat.isSymbolicLink()) throw new Error(`Nvimotator socket path is not a Unix socket: ${path}`);
+  if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+    throw new Error(`Nvimotator socket is not owned by the current user: ${path}`);
+  }
+}
+
+export async function prepareSocketPath(reservation: RegistryReservation): Promise<string> {
+  if (process.platform === "win32") {
+    throw new Error("Nvimotator requires owner-only Unix-domain sockets and is not available on native Windows.");
+  }
+  const path = bridgeSocketPath(reservation.directory, reservation.bridgeId);
+  try {
+    const stat = await lstat(path);
+    assertOwnedSocket(stat, path);
+    await unlink(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  return path;
+}
+
+export async function secureBoundSocket(path: string): Promise<SocketIdentity> {
+  const before = await lstat(path);
+  assertOwnedSocket(before, path);
+  await chmod(path, FILE_MODE);
+  const after = await lstat(path);
+  assertOwnedSocket(after, path);
+  if (before.dev !== after.dev || before.ino !== after.ino) throw new Error("Nvimotator socket identity changed during setup.");
+  if ((after.mode & 0o077) !== 0) throw new Error(`Nvimotator socket permissions are not owner-only: ${path}`);
+  return { path, dev: after.dev, ino: after.ino };
+}
+
+export async function removeSocket(path: string | undefined, identity?: SocketIdentity): Promise<void> {
+  if (!path) return;
+  try {
+    const stat = await lstat(path);
+    if (identity && (identity.path !== path || stat.dev !== identity.dev || stat.ino !== identity.ino)) return;
+    assertOwnedSocket(stat, path);
+    await unlink(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
 }
 
 function candidate(attempt: number): number {

@@ -5,7 +5,6 @@ import type { MessageSnapshot } from "./assistant-message.ts";
 import { FeedbackError, getQuickActions, type FeedbackWrapper } from "./feedback.ts";
 import {
   CONNECTION_TIMEOUT_MS,
-  LOOPBACK_HOST,
   MAX_CONCURRENT_CONNECTIONS,
   MAX_REQUEST_BYTES,
   MAX_RESPONSE_BYTES,
@@ -17,12 +16,16 @@ import {
   type BridgeResponse,
 } from "./protocol.ts";
 import {
+  prepareSocketPath,
   publishManifest,
   releaseReservation,
   removeManifest,
+  removeSocket,
   reserveBridgeId,
+  secureBoundSocket,
   updateManifest,
   type RegistryReservation,
+  type SocketIdentity,
 } from "./registry.ts";
 import { SubmissionError, SubmissionStore } from "./submission.ts";
 
@@ -51,6 +54,8 @@ export class NvimotatorBridge {
   private state: BridgeState = "stopped";
   private manifest?: BridgeManifest;
   private manifestFile?: string;
+  private socketPath?: string;
+  private socketIdentity?: SocketIdentity;
   private reservation?: RegistryReservation;
   private submissions: SubmissionStore;
   private startPromise?: Promise<BridgeManifest>;
@@ -78,6 +83,7 @@ export class NvimotatorBridge {
     } catch (error) {
       this.state = "stopped";
       await this.closeServer();
+      await removeSocket(this.socketPath, this.socketIdentity).catch(() => undefined);
       if (this.reservation) await releaseReservation(this.reservation).catch(() => undefined);
       throw error;
     } finally {
@@ -87,15 +93,15 @@ export class NvimotatorBridge {
 
   private async startInternal(): Promise<BridgeManifest> {
     this.reservation = await reserveBridgeId();
+    this.socketPath = await prepareSocketPath(this.reservation);
     await new Promise<void>((resolve, reject) => {
       const fail = (error: Error) => { this.server.off("listening", ready); reject(error); };
       const ready = () => { this.server.off("error", fail); resolve(); };
       this.server.once("error", fail);
       this.server.once("listening", ready);
-      this.server.listen(0, LOOPBACK_HOST);
+      this.server.listen(this.socketPath!);
     });
-    const address = this.server.address();
-    if (!address || typeof address === "string") throw new Error("Nvimotator bridge did not receive a TCP port.");
+    this.socketIdentity = await secureBoundSocket(this.socketPath);
     const manifest: BridgeManifest = {
       protocolVersion: PROTOCOL_VERSION,
       bridgeId: this.reservation.bridgeId,
@@ -105,8 +111,8 @@ export class NvimotatorBridge {
       entryId: this.snapshot.entryId,
       messageHash: this.snapshot.messageHash,
       pid: process.pid,
-      host: LOOPBACK_HOST,
-      port: address.port,
+      transport: "unix",
+      socketPath: this.socketPath,
       token: this.token,
       startedAt: new Date().toISOString(),
     };
@@ -144,6 +150,7 @@ export class NvimotatorBridge {
         for (const socket of this.sockets) socket.destroy();
         this.sockets.clear();
         await this.closeServer();
+        await removeSocket(this.socketPath, this.socketIdentity);
         await removeManifest(this.manifestFile, { token: this.token, instanceId: this.instanceId });
         if (this.reservation) await releaseReservation(this.reservation).catch(() => undefined);
       } catch (error) {
@@ -151,6 +158,8 @@ export class NvimotatorBridge {
       } finally {
         this.manifestFile = undefined;
         this.reservation = undefined;
+        this.socketPath = undefined;
+        this.socketIdentity = undefined;
         this.manifest = undefined;
         this.state = "stopped";
         try { this.options.onClosed?.(); } catch { /* extension callbacks must not break cleanup */ }
@@ -166,7 +175,6 @@ export class NvimotatorBridge {
       return;
     }
     this.sockets.add(socket);
-    socket.setNoDelay(true);
     socket.setTimeout(CONNECTION_TIMEOUT_MS, () => socket.destroy());
     const lifetime = setTimeout(() => socket.destroy(), CONNECTION_TIMEOUT_MS);
     lifetime.unref();

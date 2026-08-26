@@ -1,5 +1,5 @@
-export const PROTOCOL_VERSION = 1 as const;
-export const LOOPBACK_HOST = "127.0.0.1" as const;
+export const PROTOCOL_VERSION = 2 as const;
+export const MAX_UNIX_SOCKET_PATH_BYTES = 100;
 export const MAX_MANIFEST_BYTES = 16 * 1024;
 export const MAX_REQUEST_BYTES = 1024 * 1024;
 export const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
@@ -43,8 +43,8 @@ export interface BridgeManifest {
   entryId: string;
   messageHash: string;
   pid: number;
-  host: typeof LOOPBACK_HOST;
-  port: number;
+  transport: "unix";
+  socketPath: string;
   token: string;
   startedAt: string;
 }

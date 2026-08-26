@@ -1,10 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
+- Replaced host-wide IPv4 loopback TCP with authenticated protocol-v2 Unix
+  sockets inside the owner-private registry. Registry directories remain
+  `0700`; manifests and sockets are `0600`; native Windows fails closed.
+- Added `<leader>nt` and `<Plug>(NvimotatorAttach)` for prompted numeric-locator
+  attachment from an existing Neovim session.
+- Extended lifecycle and E2E coverage to socket permissions, path validation,
+  cleanup races, hard-kill stale sockets, legacy protocol rejection, and the
+  prompted mapping.
 - README install path is now mise, Neovim 0.12, latest kickstart.nvim, then this
   package. lazy.nvim/LazyVim remains an alternative.
-
 ## 0.1.0
 
 - Initial `/nvim-last` Pi bridge and same-host cross-cwd Neovim attachment.

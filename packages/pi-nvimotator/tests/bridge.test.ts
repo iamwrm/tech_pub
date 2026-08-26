@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { captureLatestAssistantSnapshot } from "../src/assistant-message.ts";
 import { NvimotatorBridge } from "../src/bridge.ts";
-import { ensureRegistryDirectory } from "../src/registry.ts";
+import { ensureRegistryDirectory, prepareSocketPath } from "../src/registry.ts";
 import { PROTOCOL_VERSION, type Annotation, type BridgeManifest } from "../src/protocol.ts";
 
 function assistant(text: string, id = "assistant-1") {
@@ -17,7 +17,7 @@ function assistant(text: string, id = "assistant-1") {
 
 function exchange(manifest: BridgeManifest, value: unknown): Promise<any> {
   return new Promise((resolve, reject) => {
-    const socket = createConnection({ host: manifest.host, port: manifest.port });
+    const socket = createConnection(manifest.socketPath);
     const chunks: Buffer[] = [];
     socket.on("connect", () => socket.end(`${JSON.stringify(value)}\n`));
     socket.on("data", (chunk) => chunks.push(chunk));
@@ -50,7 +50,7 @@ const oneAnnotation: Annotation[] = [{
   comment: "Please revise",
 }];
 
-test("loopback bridge authenticates, refreshes, renders, deduplicates, and finishes", async () => {
+test("owner-only Unix bridge authenticates, refreshes, renders, deduplicates, and finishes", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-nvimotator-bridge-"));
   const oldRegistry = process.env.PI_NVIMOTATOR_REGISTRY;
   process.env.PI_NVIMOTATOR_REGISTRY = join(root, "registry");
@@ -62,11 +62,14 @@ test("loopback bridge authenticates, refreshes, renders, deduplicates, and finis
   });
   try {
     const manifest = await bridge.start();
-    assert.equal(manifest.host, "127.0.0.1");
-    assert.ok(manifest.port > 0);
+    assert.equal(manifest.transport, "unix");
+    assert.equal(manifest.socketPath, join(root, "registry", `${manifest.bridgeId}.sock`));
     const file = join(root, "registry", `${manifest.bridgeId}.json`);
     assert.equal((await stat(join(root, "registry"))).mode & 0o077, 0);
     assert.equal((await stat(file)).mode & 0o077, 0);
+    const socketStat = await stat(manifest.socketPath);
+    assert.equal(socketStat.isSocket(), true);
+    assert.equal(socketStat.mode & 0o077, 0);
     assert.equal((JSON.parse(await readFile(file, "utf8")) as BridgeManifest).token, manifest.token);
 
     const wrong = await exchange(manifest, { ...request(manifest, "ping"), token: "wrong" });
@@ -125,6 +128,7 @@ test("loopback bridge authenticates, refreshes, renders, deduplicates, and finis
     await new Promise((resolve) => setTimeout(resolve, 25));
     assert.equal(bridge.getState(), "stopped");
     await assert.rejects(readFile(file, "utf8"), /ENOENT/);
+    await assert.rejects(stat(manifest.socketPath), /ENOENT/);
   } finally {
     await bridge.stop();
     if (oldRegistry === undefined) delete process.env.PI_NVIMOTATOR_REGISTRY;
@@ -144,7 +148,7 @@ test("stop racing start leaves no live bridge or manifest", async () => {
     await Promise.allSettled([starting, stopping]);
     assert.equal(bridge.getState(), "stopped");
     const files = await import("node:fs/promises").then(({ readdir }) => readdir(join(root, "registry")).catch(() => []));
-    assert.deepEqual(files.filter((name) => name.endsWith(".json") || name.endsWith(".lock")), []);
+    assert.deepEqual(files.filter((name) => name.endsWith(".json") || name.endsWith(".lock") || name.endsWith(".sock")), []);
   } finally {
     await bridge.stop().catch(() => undefined);
     if (oldRegistry === undefined) delete process.env.PI_NVIMOTATOR_REGISTRY;
@@ -164,6 +168,51 @@ test("an unsafe existing registry override is rejected without chmod", async () 
     await assert.rejects(ensureRegistryDirectory(), /owner-only/);
     assert.equal((await stat(directory)).mode & 0o777, 0o755);
   } finally {
+    if (oldRegistry === undefined) delete process.env.PI_NVIMOTATOR_REGISTRY;
+    else process.env.PI_NVIMOTATOR_REGISTRY = oldRegistry;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+test("socket preparation refuses non-socket entries instead of unlinking them", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-nvimotator-socket-entry-"));
+  const oldRegistry = process.env.PI_NVIMOTATOR_REGISTRY;
+  try {
+    process.env.PI_NVIMOTATOR_REGISTRY = join(root, "registry");
+    const directory = await ensureRegistryDirectory();
+    const path = join(directory, "16.sock");
+    await writeFile(path, "do not remove", { mode: 0o600 });
+    await assert.rejects(
+      prepareSocketPath({ bridgeId: 16, directory, lockPath: join(directory, "16.lock") }),
+      /not a Unix socket/,
+    );
+    assert.equal(await readFile(path, "utf8"), "do not remove");
+    await rm(path);
+    const target = join(root, "target");
+    await writeFile(target, "also keep", { mode: 0o600 });
+    await symlink(target, path);
+    await assert.rejects(
+      prepareSocketPath({ bridgeId: 16, directory, lockPath: join(directory, "16.lock") }),
+      /not a Unix socket/,
+    );
+    assert.equal((await lstat(path)).isSymbolicLink(), true);
+    assert.equal(await readFile(target, "utf8"), "also keep");
+  } finally {
+    if (oldRegistry === undefined) delete process.env.PI_NVIMOTATOR_REGISTRY;
+    else process.env.PI_NVIMOTATOR_REGISTRY = oldRegistry;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an overlong Unix socket path fails with an actionable registry override error", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-nvimotator-socket-length-"));
+  const oldRegistry = process.env.PI_NVIMOTATOR_REGISTRY;
+  const bridge = new NvimotatorBridge({ snapshot: assistant("long path"), onSubmit() {} });
+  try {
+    process.env.PI_NVIMOTATOR_REGISTRY = join(root, "x".repeat(80));
+    await assert.rejects(bridge.start(), /PI_NVIMOTATOR_REGISTRY to a shorter/);
+    assert.equal(bridge.getState(), "stopped");
+  } finally {
+    await bridge.stop().catch(() => undefined);
     if (oldRegistry === undefined) delete process.env.PI_NVIMOTATOR_REGISTRY;
     else process.env.PI_NVIMOTATOR_REGISTRY = oldRegistry;
     await rm(root, { recursive: true, force: true });

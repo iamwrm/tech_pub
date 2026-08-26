@@ -11,7 +11,7 @@ function branch(text: string, id = "assistant-1") {
 
 function manifest(snapshot: any): BridgeManifest {
   return {
-    protocolVersion: 1,
+    protocolVersion: 2,
     bridgeId: 16,
     instanceId: "instance-1",
     sessionId: snapshot.sessionId,
@@ -19,8 +19,8 @@ function manifest(snapshot: any): BridgeManifest {
     entryId: snapshot.entryId,
     messageHash: snapshot.messageHash,
     pid: process.pid,
-    host: "127.0.0.1",
-    port: 12345,
+    transport: "unix",
+    socketPath: "/tmp/pi-nvimotator-test/16.sock",
     token: "token",
     startedAt: new Date(0).toISOString(),
   };

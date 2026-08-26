@@ -11,7 +11,7 @@ local function close_handle(handle)
 end
 
 function M.request(manifest, request, callback)
-  local tcp = uv.new_tcp()
+  local pipe = uv.new_pipe(false)
   local timer = uv.new_timer()
   local chunks = {}
   local bytes = 0
@@ -20,8 +20,8 @@ function M.request(manifest, request, callback)
   local function finish(response, err)
     if completed then return end
     completed = true
-    pcall(function() tcp:read_stop() end)
-    close_handle(tcp)
+    pcall(function() pipe:read_stop() end)
+    close_handle(pipe)
     if timer then
       timer:stop()
       close_handle(timer)
@@ -35,12 +35,12 @@ function M.request(manifest, request, callback)
     finish(nil, "Nvimotator bridge request timed out; delivery status may be uncertain.")
   end)
 
-  tcp:connect(manifest.host, manifest.port, function(connect_error)
+  pipe:connect(manifest.socketPath, function(connect_error)
     if connect_error then
-      finish(nil, "Could not connect to the Nvimotator bridge.")
+      finish(nil, "Could not connect to the owner-only Nvimotator socket.")
       return
     end
-    tcp:read_start(function(read_error, data)
+    pipe:read_start(function(read_error, data)
       if read_error then
         finish(nil, "Could not read the Nvimotator bridge response.")
         return
@@ -66,7 +66,7 @@ function M.request(manifest, request, callback)
         finish(nil, "Nvimotator bridge returned invalid JSON.")
         return
       end
-      if response.protocolVersion ~= 1 or response.requestId ~= request.requestId then
+      if response.protocolVersion ~= 2 or response.requestId ~= request.requestId then
         finish(nil, "Nvimotator bridge response identity does not match the request.")
         return
       end
@@ -74,12 +74,12 @@ function M.request(manifest, request, callback)
     end)
 
     local encoded = vim.json.encode(request) .. "\n"
-    tcp:write(encoded, function(write_error)
+    pipe:write(encoded, function(write_error)
       if write_error then
         finish(nil, "Could not write the Nvimotator bridge request.")
         return
       end
-      tcp:shutdown(function(shutdown_error)
+      pipe:shutdown(function(shutdown_error)
         if shutdown_error then
           finish(nil, "Could not finish the Nvimotator bridge request.")
         end

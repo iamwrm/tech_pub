@@ -1,11 +1,12 @@
 vim.opt.runtimepath:prepend(assert(vim.env.PI_NVIMOTATOR_PACKAGE))
 vim.opt.swapfile = false
 vim.opt.shadafile = "NONE"
-vim.g.pi_nvimotator_disable_default_mappings = true
+vim.g.pi_nvimotator_disable_default_mappings = false
 
 local artifact_dir = assert(vim.env.NVIMOTATOR_E2E_ARTIFACTS)
 local export_path = assert(vim.env.NVIMOTATOR_E2E_EXPORT)
 local select_queue = {}
+local input_queue = {}
 
 local function write_bytes(path, bytes)
   local file = assert(io.open(path, "wb"))
@@ -27,6 +28,10 @@ vim.ui.select = function(items, _, callback)
   callback(items[choice])
 end
 
+vim.ui.input = function(_, callback)
+  callback(table.remove(input_queue, 1))
+end
+
 require("pi_nvimotator").setup({
   clipboard = function(text)
     write_bytes(export_path, text)
@@ -37,8 +42,10 @@ vim.cmd("runtime plugin/pi_nvimotator.lua")
 
 _G.nvimotator_e2e = {}
 
-function _G.nvimotator_e2e.attach(id)
-  vim.cmd("NvimotatorAttach " .. tostring(id))
+function _G.nvimotator_e2e.attach_via_mapping(id)
+  table.insert(input_queue, tostring(id))
+  local keys = vim.api.nvim_replace_termcodes("<leader>nt", true, false, true)
+  vim.api.nvim_feedkeys(keys, "mx", false)
   return true
 end
 

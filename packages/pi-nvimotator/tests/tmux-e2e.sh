@@ -170,14 +170,15 @@ if ! MANIFEST_FILE=$(wait_registry_file 2); then
   MANIFEST_FILE=$(wait_registry_file 10)
 fi
 BRIDGE_ID=$(basename "$MANIFEST_FILE" .json)
+BRIDGE_SOCKET=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).socketPath' "$MANIFEST_FILE")
 wait_pane_text "$PI_PANE" "nvim -c 'NvimotatorAttach $BRIDGE_ID'"
 
 node - "$MANIFEST_FILE" "$ARTIFACTS/tokenless-response.json" <<'NODE'
 const fs = require("fs"); const net = require("net");
 const [manifestPath, outputPath] = process.argv.slice(2); const m = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-const request = { protocolVersion: 1, requestId: "tokenless-e2e", type: "ping", bridgeId: m.bridgeId,
+const request = { protocolVersion: 2, requestId: "tokenless-e2e", type: "ping", bridgeId: m.bridgeId,
   instanceId: m.instanceId, sessionId: m.sessionId, snapshotId: m.snapshotId };
-const chunks = []; const socket = net.createConnection({ host: m.host, port: m.port });
+const chunks = []; const socket = net.createConnection(m.socketPath);
 socket.on("connect", () => socket.end(JSON.stringify(request) + "\n"));
 socket.on("data", chunk => chunks.push(chunk));
 socket.on("end", () => {
@@ -188,7 +189,7 @@ socket.on("end", () => {
 socket.on("error", error => { throw error; });
 NODE
 
-nvim_expr "luaeval('nvimotator_e2e.attach($BRIDGE_ID)')" >/dev/null
+nvim_expr "luaeval('nvimotator_e2e.attach_via_mapping($BRIDGE_ID)')" >/dev/null
 wait_nvim_phase ready
 nvim_expr "luaeval('nvimotator_e2e.capture()')" >/dev/null
 cmp "$FIXTURES/assistant.md" "$ARTIFACTS/attached.bin"
@@ -229,6 +230,7 @@ wait_pane_text "$PI_PANE" 'NVIMOTATOR_E2E_ACK'
 [[ $(cat "$ARTIFACTS/call-count") == 2 ]]
 for _ in $(seq 1 100); do [[ ! -e "$MANIFEST_FILE" ]] && break; sleep 0.05; done
 [[ ! -e "$MANIFEST_FILE" ]]
+[[ ! -e "$BRIDGE_SOCKET" ]]
 
 # A hard-killed Pi cannot perform lifecycle cleanup; Neovim must remove only the unchanged stale locator.
 tmux -S "$TMUX_SOCKET" send-keys -t "$PI_PANE" -l '/nvim-last'
@@ -238,15 +240,17 @@ if ! STALE_MANIFEST=$(wait_registry_file 2); then
   STALE_MANIFEST=$(wait_registry_file 10)
 fi
 STALE_ID=$(basename "$STALE_MANIFEST" .json)
+STALE_SOCKET=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).socketPath' "$STALE_MANIFEST")
 PI_PID=$(tmux -S "$TMUX_SOCKET" display-message -p -t "$PI_PANE" '#{pane_pid}')
 kill -KILL "$PI_PID"
 for _ in $(seq 1 100); do
   [[ $(tmux -S "$TMUX_SOCKET" display-message -p -t "$PI_PANE" '#{pane_dead}') == 1 ]] && break
   sleep 0.05
 done
-nvim_expr "luaeval('nvimotator_e2e.attach($STALE_ID)')" >/dev/null
+nvim_expr "luaeval('nvimotator_e2e.attach_via_mapping($STALE_ID)')" >/dev/null
 for _ in $(seq 1 100); do [[ ! -e "$STALE_MANIFEST" ]] && break; sleep 0.05; done
 [[ ! -e "$STALE_MANIFEST" ]]
+[[ ! -e "$STALE_SOCKET" ]]
 wait_nvim_phase detached
 
 SUCCEEDED=1

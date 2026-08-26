@@ -16,7 +16,7 @@ end
 
 function M.base(manifest, kind)
   return {
-    protocolVersion = 1,
+    protocolVersion = 2,
     requestId = M.request_id(),
     type = kind,
     token = manifest.token,

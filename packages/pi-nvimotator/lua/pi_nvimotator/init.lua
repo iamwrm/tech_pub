@@ -118,6 +118,15 @@ function M.attach(raw_id)
   end)
 end
 
+function M.attach_prompt()
+  vim.ui.input({ prompt = "Nvimotator bridge ID: " }, function(value)
+    if value == nil then return end
+    value = vim.trim(value)
+    if value == "" then return end
+    M.attach(value)
+  end)
+end
+
 local function add_comment(anchor, title)
   local generation = state.generation
   local _, modal_error = modal.comment({
