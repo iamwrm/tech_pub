@@ -5,8 +5,6 @@ vim.g.pi_nvimotator_disable_default_mappings = false
 
 local artifact_dir = assert(vim.env.NVIMOTATOR_E2E_ARTIFACTS)
 local export_path = assert(vim.env.NVIMOTATOR_E2E_EXPORT)
-local select_queue = {}
-local input_queue = {}
 
 local function write_bytes(path, bytes)
   local file = assert(io.open(path, "wb"))
@@ -23,14 +21,6 @@ vim.notify = function(message, level)
 end
 
 
-vim.ui.select = function(items, _, callback)
-  local choice = table.remove(select_queue, 1) or 1
-  callback(items[choice])
-end
-
-vim.ui.input = function(_, callback)
-  callback(table.remove(input_queue, 1))
-end
 
 require("pi_nvimotator").setup({
   clipboard = function(text)
@@ -43,9 +33,11 @@ vim.cmd("runtime plugin/pi_nvimotator.lua")
 _G.nvimotator_e2e = {}
 
 function _G.nvimotator_e2e.attach_via_mapping(id)
-  table.insert(input_queue, tostring(id))
   local keys = vim.api.nvim_replace_termcodes("<leader>nt", true, false, true)
   vim.api.nvim_feedkeys(keys, "mx", false)
+  local active = assert(require("pi_nvimotator.modal")._active(), "attach input did not open")
+  vim.api.nvim_buf_set_lines(active.buffer, 0, -1, false, { tostring(id) })
+  vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<CR>", true, false, true), "mx", false)
   return true
 end
 
@@ -75,10 +67,31 @@ function _G.nvimotator_e2e.capture()
   return true
 end
 
+local function assert_displaced_modal()
+  local active = assert(require("pi_nvimotator.modal")._active(), "owned modal did not open")
+  if active.lease.kind ~= "float" then return end
+  local config = vim.api.nvim_win_get_config(active.lease.window)
+  local outer_top = config.row + 1
+  local outer_bottom = outer_top + config.height + 1
+  local overlap = 0
+  for line = 1, vim.api.nvim_buf_line_count(active.lease.source_buffer) do
+    local position = vim.fn.screenpos(active.lease.source_window, line, 1)
+    if position.row >= outer_top and position.row <= outer_bottom then overlap = overlap + 1 end
+  end
+  assert(overlap == 0, "owned modal overlaps real source rows")
+  write_bytes(artifact_dir .. "/modal-geometry.json", vim.json.encode({
+    kind = active.lease.kind,
+    overlap = overlap,
+    occupiedRows = active.lease.occupied_rows,
+    floatHeight = config.height,
+  }))
+end
+
 local function submit_comment(text, open_editor)
   local before = _G.nvimotator_e2e.count()
   open_editor()
   assert(require("pi_nvimotator.modal").is_open(), "comment editor did not open")
+  assert_displaced_modal()
   local buffer = vim.api.nvim_get_current_buf()
   vim.api.nvim_buf_set_lines(buffer, 0, -1, false, vim.split(text, "\n", { plain = true }))
   local submit = vim.api.nvim_replace_termcodes("<C-s>", true, false, true)
@@ -126,8 +139,13 @@ function _G.nvimotator_e2e.capture_global_panel()
 end
 
 function _G.nvimotator_e2e.quick_line()
-  table.insert(select_queue, 4)
+  local before = _G.nvimotator_e2e.count()
   vim.cmd("7NvimotatorQuick")
+  assert_displaced_modal()
+  local active = assert(require("pi_nvimotator.modal")._active())
+  vim.api.nvim_win_set_cursor(active.lease.window, { 4, 0 })
+  vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<CR>", true, false, true), "mx", false)
+  assert(vim.wait(1000, function() return _G.nvimotator_e2e.count() == before + 1 end), "quick action was not saved")
   return _G.nvimotator_e2e.count()
 end
 

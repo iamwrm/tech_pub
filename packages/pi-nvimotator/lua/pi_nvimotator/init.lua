@@ -119,12 +119,16 @@ function M.attach(raw_id)
 end
 
 function M.attach_prompt()
-  vim.ui.input({ prompt = "Nvimotator bridge ID: " }, function(value)
+  local _, modal_error = modal.input({
+    prompt = "Nvimotator bridge ID",
+    source_window = vim.api.nvim_get_current_win(),
+  }, function(value)
     if value == nil then return end
     value = vim.trim(value)
     if value == "" then return end
     M.attach(value)
   end)
+  if modal_error then notify("Could not open attachment prompt: " .. modal_error, vim.log.levels.ERROR) end
 end
 
 local function add_comment(anchor, title)
@@ -155,11 +159,12 @@ end
 
 local function add_quick(anchor)
   local generation = state.generation
-  modal.quick(state.actions, function(action)
+  local _, modal_error = modal.quick(state.actions, function(action)
     if generation ~= state.generation or not ensure_ready(false) then return end
     local id, add_error = state.store:add_action(anchor, action)
     if not id then notify(add_error, vim.log.levels.WARN) end
   end)
+  if modal_error then notify("Could not open quick-action picker: " .. modal_error, vim.log.levels.ERROR) end
 end
 
 function M.quick_range(first_line, last_line)
@@ -283,18 +288,19 @@ function M.clear()
     notify("There are no pending annotations.")
     return
   end
-  modal.confirm_clear(state.store:count(), state.pending ~= nil, function()
+  local _, modal_error = modal.confirm_clear(state.store:count(), state.pending ~= nil, function()
     if not ensure_ready(false) then return end
     state.pending = nil
     state.store:clear()
     draft.delete(identity())
     notify("Cleared pending Nvimotator annotations.")
   end)
+  if modal_error then notify("Could not open clear confirmation: " .. modal_error, vim.log.levels.ERROR) end
 end
 
 function M.comments()
   if not ensure_ready(false) then return end
-  modal.overview(state.store:list(), function(action, record)
+  local _, overview_error = modal.overview(state.store:list(), function(action, record)
     if not ensure_ready(false) then return end
     if action == "clear" then
       M.clear()
@@ -320,6 +326,7 @@ function M.comments()
       M.send()
     end
   end)
+  if overview_error then notify("Could not open annotation overview: " .. overview_error, vim.log.levels.ERROR) end
 end
 
 function M.setup(options)

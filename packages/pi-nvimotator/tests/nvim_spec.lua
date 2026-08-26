@@ -17,6 +17,7 @@ local annotations = require("pi_nvimotator.annotations")
 local draft = require("pi_nvimotator.draft")
 local protocol = require("pi_nvimotator.protocol")
 local modal = require("pi_nvimotator.modal")
+local layout = require("pi_nvimotator.layout")
 local registry = require("pi_nvimotator.registry")
 
 ok(vim.fn.exists(":NvimotatorAttach") == 2, "plugin commands were not loaded")
@@ -51,6 +52,10 @@ eq(reattached, bufnr, "same-snapshot reattach reuses the scratch buffer")
 
 local returned_comment
 local source_window = vim.api.nvim_get_current_win()
+local source_bytes_before_modal = table.concat(vim.api.nvim_buf_get_lines(bufnr, 0, -1, true), "\n")
+local source_line_count_before_modal = vim.api.nvim_buf_line_count(bufnr)
+local source_cursor_before_modal = vim.api.nvim_win_get_cursor(source_window)
+local source_view_before_modal = vim.api.nvim_win_call(source_window, function() return vim.fn.winsaveview() end)
 local comment_window, comment_error = modal.comment({
   title = "Headless comment",
   source_window = source_window,
@@ -58,6 +63,23 @@ local comment_window, comment_error = modal.comment({
 }, function(value) returned_comment = value end)
 ok(comment_window, comment_error)
 eq(vim.api.nvim_win_get_config(comment_window).relative, "editor", "comment editor float")
+local active_comment = assert(modal._active(), "comment layout lease")
+eq(active_comment.lease.kind, "float", "comment uses displaced float")
+local comment_config = vim.api.nvim_win_get_config(comment_window)
+local outer_top = comment_config.row + 1
+local outer_bottom = outer_top + comment_config.height + 1
+for line = 1, vim.api.nvim_buf_line_count(bufnr) do
+  local position = vim.fn.screenpos(source_window, line, 1)
+  if position.row > 0 then
+    ok(position.row < outer_top or position.row > outer_bottom, "real source line is not beneath the comment float")
+  end
+end
+local displacement_marks = vim.api.nvim_buf_get_extmarks(bufnr, layout.namespace(), 0, -1, { details = true })
+eq(#displacement_marks, 1, "comment has one displacement lease")
+eq(#displacement_marks[1][4].virt_lines, comment_config.height + 2, "displacement reserves the bordered float height")
+eq(vim.api.nvim_buf_line_count(bufnr), source_line_count_before_modal, "displacement does not add buffer lines")
+eq(table.concat(vim.api.nvim_buf_get_lines(bufnr, 0, -1, true), "\n"), source_bytes_before_modal,
+  "displacement does not change source bytes")
 local comment_buffer = vim.api.nvim_win_get_buf(comment_window)
 eq(vim.bo[comment_buffer].filetype, "markdown", "comment editor filetype")
 vim.api.nvim_buf_set_lines(comment_buffer, 0, -1, false, { "first line", "second line" })
@@ -67,22 +89,27 @@ ok(vim.wait(1000, function() return returned_comment ~= nil end), "comment edito
 eq(returned_comment, "first line\nsecond line", "multiline comment editor result")
 eq(modal.is_open(), false, "comment editor closed after submit")
 eq(vim.api.nvim_get_current_win(), source_window, "comment editor restored source window")
+eq(#vim.api.nvim_buf_get_extmarks(bufnr, layout.namespace(), 0, -1, {}), 0, "comment cleanup removes displacement")
+eq(vim.api.nvim_win_get_cursor(source_window), source_cursor_before_modal, "comment cleanup restores source cursor")
+local restored_source_view = vim.api.nvim_win_call(source_window, function() return vim.fn.winsaveview() end)
+eq(restored_source_view.topline, source_view_before_modal.topline, "comment cleanup restores source topline")
+eq(restored_source_view.leftcol, source_view_before_modal.leftcol, "comment cleanup restores horizontal view")
 
-local original_quick_select = vim.ui.select
 local selected_quick_action
 local quick_actions = {
   { id = "deletion", label = "Deletion", description = "I don't want this in the message." },
   { id = "missing-overview", label = "🗺️ Missing overview", description = "A deliberately long agent-facing tip." },
 }
-vim.ui.select = function(items, options, callback)
-  eq(options.prompt, "Nvimotator quick action", "quick picker prompt")
-  eq(options.format_item(items[1]), "Deletion", "quick picker omits deletion guidance")
-  eq(options.format_item(items[2]), "🗺️ Missing overview", "quick picker omits label guidance")
-  callback(items[2])
-end
-modal.quick(quick_actions, function(action) selected_quick_action = action end)
-vim.ui.select = original_quick_select
+local quick_window, quick_error = modal.quick(quick_actions, function(action) selected_quick_action = action end)
+ok(quick_window, quick_error)
+local quick_buffer = vim.api.nvim_win_get_buf(quick_window)
+eq(vim.api.nvim_buf_get_lines(quick_buffer, 0, -1, false), { "Deletion", "🗺️ Missing overview" },
+  "owned quick picker keeps compact labels")
+vim.api.nvim_win_set_cursor(quick_window, { 2, 0 })
+vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<CR>", true, false, true), "mx", false)
+ok(vim.wait(1000, function() return selected_quick_action ~= nil end), "quick picker callback")
 eq(selected_quick_action.id, "missing-overview", "quick picker returns the full selected action")
+eq(#vim.api.nvim_buf_get_extmarks(bufnr, layout.namespace(), 0, -1, {}), 0, "quick picker cleanup removes displacement")
 
 local line_anchor = scratch.line_anchor(bufnr, 2, 3)
 eq(line_anchor, {
@@ -148,44 +175,61 @@ store:replace(records_with_global)
 ok(global_panel_text():match("Restored global feedback"), "global panel restored from draft records")
 eq(table.concat(vim.api.nvim_buf_get_lines(bufnr, 0, -1, true), "\n"), snapshot.text, "global panel does not alter snapshot bytes")
 
-local original_select = vim.ui.select
 local selected_overview_action
 local selected_overview_record = "unset"
-vim.ui.select = function(items, options, callback)
-  eq(options.prompt, "Nvimotator annotations", "comments overview prompt")
-  local clear_item
-  for _, item in ipairs(items) do
-    if item.__overview_action == "clear" then clear_item = item; break end
-  end
-  ok(clear_item, "comments overview clear-all option")
-  eq(options.format_item(clear_item), "◆ Clear all annotations…", "comments overview clear-all label")
-  callback(clear_item)
-end
-modal.overview(store:list(), function(action, record)
+local overview_window, overview_error = modal.overview(store:list(), function(action, record)
   selected_overview_action = action
   selected_overview_record = record
 end)
-vim.ui.select = original_select
+ok(overview_window, overview_error)
+local overview_buffer = vim.api.nvim_win_get_buf(overview_window)
+local overview_lines = vim.api.nvim_buf_get_lines(overview_buffer, 0, -1, false)
+eq(overview_lines[#overview_lines], "◆ Clear all annotations…", "comments overview clear-all label")
+vim.api.nvim_win_set_cursor(overview_window, { #overview_lines, 0 })
+vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<CR>", true, false, true), "mx", false)
+ok(vim.wait(1000, function() return selected_overview_action ~= nil end), "comments overview callback")
 eq(selected_overview_action, "clear", "comments overview clear-all action")
 eq(selected_overview_record, nil, "clear-all is not tied to one annotation")
 
+local confirmed = false
+local confirm_window, confirm_error = modal.confirm_clear(2, false, function() confirmed = true end)
+ok(confirm_window, confirm_error)
+vim.api.nvim_win_set_cursor(confirm_window, { 2, 0 })
+vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<CR>", true, false, true), "mx", false)
+ok(vim.wait(1000, function() return confirmed end), "owned confirmation callback")
+eq(#vim.api.nvim_buf_get_extmarks(bufnr, layout.namespace(), 0, -1, {}), 0, "confirmation cleanup removes displacement")
+
 local nvimotator = require("pi_nvimotator")
-local original_input = vim.ui.input
 local original_attach = nvimotator.attach
 local prompted_id
-vim.ui.input = function(options, callback)
-  eq(options.prompt, "Nvimotator bridge ID: ", "attach prompt")
-  callback(" 16 ")
-end
 nvimotator.attach = function(value) prompted_id = value end
+local attach_source = vim.api.nvim_get_current_win()
 nvimotator.attach_prompt()
+local attach_modal = assert(modal._active(), "owned attach input")
+local attach_buffer = attach_modal.buffer
+vim.bo[attach_buffer].modifiable = true
+vim.api.nvim_buf_set_lines(attach_buffer, 0, -1, false, { " 16 " })
+vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<CR>", true, false, true), "mx", false)
+ok(vim.wait(1000, function() return prompted_id ~= nil end), "attach input callback")
 eq(prompted_id, "16", "prompted attach trims and forwards the bridge ID")
+eq(vim.api.nvim_get_current_win(), attach_source, "attach input restores source window")
 prompted_id = nil
-vim.ui.input = function(_, callback) callback(nil) end
 nvimotator.attach_prompt()
+vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "mx", false)
+ok(vim.wait(1000, function() return not modal.is_open() end), "attach input cancel closes")
 eq(prompted_id, nil, "cancelled attach prompt does nothing")
 nvimotator.attach = original_attach
-vim.ui.input = original_input
+
+vim.cmd("belowright 3new")
+local tiny_source = vim.api.nvim_get_current_win()
+pcall(vim.api.nvim_win_set_height, tiny_source, 3)
+local tiny_window, tiny_error = modal.input({ prompt = "Tiny", source_window = tiny_source }, function() end)
+ok(tiny_window, tiny_error)
+eq(modal._active().lease.kind, "split", "tiny source window uses non-overlapping split fallback")
+vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "mx", false)
+ok(vim.wait(1000, function() return not modal.is_open() end), "split fallback closes")
+if vim.api.nvim_win_is_valid(tiny_source) then vim.api.nvim_win_close(tiny_source, true) end
+vim.api.nvim_set_current_win(source_window)
 local nvimotator_state = nvimotator._state()
 nvimotator_state.phase = "ready"
 nvimotator_state.store = store

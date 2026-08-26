@@ -1,3 +1,4 @@
+local layout = require("pi_nvimotator.layout")
 local M = {}
 
 -- Floating comment editor adapted from jillesme/pi-nvim-review (MIT).
@@ -13,64 +14,18 @@ local function valid_window(window)
   return window and vim.api.nvim_win_is_valid(window)
 end
 
-local function available_height()
-  return math.max(1, vim.o.lines - vim.o.cmdheight)
+local function title_text(title, width)
+  return " " .. vim.fn.strcharpart(title, 0, math.max(1, width - 4)) .. " "
 end
 
-local function centered_config(width, height, title, footer)
-  return {
-    relative = "editor",
-    row = math.max(0, math.floor((available_height() - height - 2) / 2)),
-    col = math.max(0, math.floor((vim.o.columns - width - 2) / 2)),
-    width = width,
-    height = height,
-    style = "minimal",
-    border = "rounded",
-    title = title,
-    title_pos = "center",
-    footer = footer,
-    footer_pos = "center",
-    zindex = 60,
-  }
-end
-
-local function below_line_config(source_window, target_line, width, height, title, footer)
-  if not valid_window(source_window) or not target_line or target_line < 1 then
-    return centered_config(width, height, title, footer)
-  end
-  local position = vim.fn.screenpos(source_window, target_line, 1)
-  if type(position) ~= "table" or position.row == 0 then
-    return centered_config(width, height, title, footer)
-  end
-  local row = position.row
-  local space_below = available_height() - row - 2
-  if space_below < 3 then return centered_config(width, height, title, footer) end
-  height = math.min(height, space_below)
-  local col = math.max(0, math.min(position.col - 1, vim.o.columns - width - 2))
-  return {
-    relative = "editor",
-    row = row,
-    col = col,
-    width = width,
-    height = height,
-    style = "minimal",
-    border = "rounded",
-    title = title,
-    title_pos = "center",
-    footer = footer,
-    footer_pos = "center",
-    zindex = 60,
-  }
-end
-
-local function create_buffer()
+local function create_buffer(kind, filetype)
   buffer_counter = buffer_counter + 1
   local buffer = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_name(buffer, "nvimotator://comment/" .. buffer_counter)
+  vim.api.nvim_buf_set_name(buffer, string.format("nvimotator://%s/%d", kind, buffer_counter))
   vim.bo[buffer].buftype = "nofile"
   vim.bo[buffer].bufhidden = "wipe"
   vim.bo[buffer].swapfile = false
-  vim.bo[buffer].filetype = "markdown"
+  vim.bo[buffer].filetype = filetype or "nvimotator"
   return buffer
 end
 
@@ -78,68 +33,73 @@ local function finish(value)
   local current = active
   if not current then return end
   active = nil
-  if valid_window(current.window) and vim.api.nvim_get_current_win() == current.window then
+  if valid_window(current.lease.window) and vim.api.nvim_get_current_win() == current.lease.window then
     pcall(vim.cmd.stopinsert)
   end
-  if valid_window(current.window) then pcall(vim.api.nvim_win_close, current.window, true) end
+  layout.close(current.lease)
   if valid_buffer(current.buffer) then pcall(vim.api.nvim_buf_delete, current.buffer, { force = true }) end
-  if valid_window(current.return_window) then pcall(vim.api.nvim_set_current_win, current.return_window) end
   vim.schedule(function() current.callback(value) end)
 end
 
-local function title_text(title, width)
-  return " " .. vim.fn.strcharpart(title, 0, math.max(1, width - 4)) .. " "
+local function open_modal(buffer, options, callback)
+  if active then return nil, "another Nvimotator modal is already open" end
+  local lease, open_error = layout.open(buffer, options)
+  if not lease then return nil, open_error end
+  active = { buffer = buffer, lease = lease, callback = callback }
+  vim.api.nvim_create_autocmd("WinClosed", {
+    pattern = tostring(lease.window),
+    once = true,
+    callback = function()
+      if active and active.lease.window == lease.window then finish(nil) end
+    end,
+  })
+  return lease.window, lease
 end
 
-function M.comment(options, callback)
-  if active then return nil, "another Nvimotator comment editor is already open" end
-  options = options or {}
-  local width = math.max(1, math.min(options.width or 72, vim.o.columns - 4))
-  local height = math.max(1, math.min(options.height or 8, available_height() - 4))
-  local buffer = create_buffer()
-  if type(options.initial_text) == "string" and options.initial_text ~= "" then
-    vim.api.nvim_buf_set_lines(buffer, 0, -1, false, vim.split(options.initial_text, "\n", { plain = true }))
-  end
-  local title = title_text(options.title or "Nvimotator comment", width)
-  local window_config = below_line_config(
-    options.source_window,
-    options.target_line,
-    width,
-    height,
-    title,
-    " <C-s> save · <Esc> cancel "
-  )
-  local return_window = vim.api.nvim_get_current_win()
-  local ok, window = pcall(vim.api.nvim_open_win, buffer, true, window_config)
-  if not ok then
-    pcall(vim.api.nvim_buf_delete, buffer, { force = true })
-    return nil, tostring(window)
-  end
-  active = { buffer = buffer, window = window, return_window = return_window, callback = callback }
-  vim.wo[window].wrap = true
-  vim.wo[window].linebreak = true
+local function common_window_options(window, wrap)
+  vim.wo[window].wrap = wrap == true
+  vim.wo[window].linebreak = wrap == true
   vim.wo[window].number = false
   vim.wo[window].relativenumber = false
   vim.wo[window].signcolumn = "no"
   vim.wo[window].foldcolumn = "0"
+end
 
-  vim.api.nvim_create_autocmd("WinClosed", {
-    pattern = tostring(window),
-    once = true,
-    callback = function()
-      if active and active.window == window then finish(nil) end
-    end,
-  })
+local function cancel_mappings(buffer)
+  local options = { buffer = buffer, silent = true, nowait = true }
+  vim.keymap.set({ "n", "i" }, "<Esc>", function() finish(nil) end, options)
+  vim.keymap.set("n", "q", function() finish(nil) end, options)
+  vim.keymap.set({ "n", "i" }, "<C-c>", function() finish(nil) end, options)
+end
+
+function M.comment(options, callback)
+  options = options or {}
+  local width = options.width or 72
+  local buffer = create_buffer("comment", "markdown")
+  if type(options.initial_text) == "string" and options.initial_text ~= "" then
+    vim.api.nvim_buf_set_lines(buffer, 0, -1, false, vim.split(options.initial_text, "\n", { plain = true }))
+  end
+  local window, lease_or_error = open_modal(buffer, {
+    source_window = options.source_window,
+    target_line = options.target_line,
+    width = width,
+    height = options.height or 8,
+    title = title_text(options.title or "Nvimotator comment", width),
+    footer = " <C-s> save · <Esc> cancel ",
+  }, callback)
+  if not window then
+    pcall(vim.api.nvim_buf_delete, buffer, { force = true })
+    return nil, lease_or_error
+  end
+  common_window_options(window, true)
+
   local function submit()
     if not valid_buffer(buffer) then finish(nil); return end
     finish(table.concat(vim.api.nvim_buf_get_lines(buffer, 0, -1, false), "\n"))
   end
-  local function cancel() finish(nil) end
   local map_options = { buffer = buffer, silent = true, nowait = true }
   vim.keymap.set({ "n", "i" }, "<C-s>", submit, map_options)
-  vim.keymap.set({ "n", "i" }, "<Esc>", cancel, map_options)
-  vim.keymap.set("n", "q", cancel, map_options)
-  vim.keymap.set({ "n", "i" }, "<C-c>", cancel, map_options)
+  cancel_mappings(buffer)
   vim.schedule(function()
     if valid_window(window) then
       vim.api.nvim_set_current_win(window)
@@ -152,13 +112,92 @@ function M.comment(options, callback)
   return window
 end
 
+function M.input(options, callback)
+  options = options or {}
+  local width = options.width or 44
+  local buffer = create_buffer("input", "nvimotator")
+  if type(options.default) == "string" then
+    vim.api.nvim_buf_set_lines(buffer, 0, -1, false, { options.default })
+  end
+  local window, lease_or_error = open_modal(buffer, {
+    source_window = options.source_window,
+    target_line = options.target_line,
+    width = width,
+    height = 1,
+    title = title_text(options.prompt or "Nvimotator input", width),
+    footer = " <Enter> accept · <Esc> cancel ",
+  }, callback)
+  if not window then
+    pcall(vim.api.nvim_buf_delete, buffer, { force = true })
+    return nil, lease_or_error
+  end
+  common_window_options(window, false)
+  local function submit()
+    local value = valid_buffer(buffer) and (vim.api.nvim_buf_get_lines(buffer, 0, 1, false)[1] or "") or nil
+    finish(value)
+  end
+  local map_options = { buffer = buffer, silent = true, nowait = true }
+  vim.keymap.set({ "n", "i" }, "<CR>", submit, map_options)
+  cancel_mappings(buffer)
+  vim.schedule(function()
+    if valid_window(window) then
+      vim.api.nvim_set_current_win(window)
+      local value = vim.api.nvim_buf_get_lines(buffer, 0, 1, false)[1] or ""
+      vim.api.nvim_win_set_cursor(window, { 1, #value })
+      vim.cmd.startinsert()
+    end
+  end)
+  return window
+end
+
+function M.select(items, options, callback)
+  options = options or {}
+  if #items == 0 then return nil, "Nvimotator picker has no items" end
+  local labels = {}
+  local width = vim.fn.strdisplaywidth(options.prompt or "Nvimotator") + 4
+  for _, item in ipairs(items) do
+    local value = options.format_item and options.format_item(item) or tostring(item)
+    value = tostring(value):gsub("[\r\n]", " ↵ ")
+    table.insert(labels, value)
+    width = math.max(width, vim.fn.strdisplaywidth(value) + 2)
+  end
+  width = math.min(options.width or 80, width)
+  local buffer = create_buffer("select", "nvimotator")
+  vim.api.nvim_buf_set_lines(buffer, 0, -1, false, labels)
+  vim.bo[buffer].modifiable = false
+  local window, lease_or_error = open_modal(buffer, {
+    source_window = options.source_window,
+    target_line = options.target_line,
+    width = width,
+    height = math.min(#items, options.height or 10),
+    title = title_text(options.prompt or "Nvimotator", width),
+    footer = " j/k move · <Enter> select · <Esc> cancel ",
+  }, callback)
+  if not window then
+    pcall(vim.api.nvim_buf_delete, buffer, { force = true })
+    return nil, lease_or_error
+  end
+  common_window_options(window, false)
+  vim.wo[window].cursorline = true
+  local function choose()
+    local row = vim.api.nvim_win_get_cursor(window)[1]
+    finish(items[row])
+  end
+  local map_options = { buffer = buffer, silent = true, nowait = true }
+  vim.keymap.set("n", "<CR>", choose, map_options)
+  vim.keymap.set("n", "j", "j", map_options)
+  vim.keymap.set("n", "k", "k", map_options)
+  vim.keymap.set("n", "<Down>", "j", map_options)
+  vim.keymap.set("n", "<Up>", "k", map_options)
+  cancel_mappings(buffer)
+  return window
+end
+
 function M.quick(actions, callback)
-  vim.ui.select(actions, {
+  return M.select(actions, {
     prompt = "Nvimotator quick action",
     format_item = function(action) return action.label end,
-  }, function(action)
-    if action then callback(action) end
-  end)
+  }, callback)
 end
 
 local function label(record)
@@ -182,7 +221,7 @@ function M.overview(records, callback)
   local items = {}
   for _, record in ipairs(records) do table.insert(items, record) end
   table.insert(items, { __overview_action = "clear", label = "Clear all annotations…" })
-  vim.ui.select(items, {
+  return M.select(items, {
     prompt = "Nvimotator annotations",
     format_item = function(item)
       if item.__overview_action then return "◆ " .. item.label end
@@ -203,17 +242,22 @@ function M.overview(records, callback)
     }
     if record.kind ~= "comment" then table.remove(actions, 2) end
     if not record.anchor then table.remove(actions, 1) end
-    vim.ui.select(actions, { prompt = "Nvimotator action", format_item = function(item) return item.label end }, function(action)
+    local _, select_error = M.select(actions, {
+      prompt = "Nvimotator action",
+      format_item = function(item) return item.label end,
+    }, function(action)
       if action then callback(action.id, record) end
     end)
+    if select_error then
+      vim.notify("Could not open Nvimotator action picker: " .. select_error, vim.log.levels.ERROR)
+    end
   end)
 end
 
 function M.confirm_clear(count, uncertain, callback)
   local warning = string.format("Clear %d pending annotation%s?", count, count == 1 and "" or "s")
   if uncertain then warning = warning .. " A submission acknowledgement is still uncertain." end
-  local choices = { "Cancel", "Clear" }
-  vim.ui.select(choices, { prompt = warning }, function(choice)
+  return M.select({ "Cancel", "Clear" }, { prompt = warning }, function(choice)
     if choice == "Clear" then callback() end
   end)
 end
@@ -224,6 +268,10 @@ end
 
 function M.is_open()
   return active ~= nil
+end
+
+function M._active()
+  return active
 end
 
 return M

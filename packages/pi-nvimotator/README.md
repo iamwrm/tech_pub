@@ -153,9 +153,11 @@ assistant message as an immutable Markdown scratch buffer.
 | `:NvimotatorSend` | Schedule feedback in the originating Pi session and close the bridge. |
 | `:NvimotatorClear` | Confirm and clear this snapshot's pending annotations. |
 
-Comments open in a rounded multiline Markdown editor, positioned below the
-selected line when space permits. Press `<C-s>` in normal or insert mode to
-save; press `<Esc>` or `<C-c>` to cancel.
+Comments open in a rounded multiline Markdown editor below the selected line.
+Temporary blank virtual lines displace the following source rows, so the float
+covers no source text while snapshot bytes and annotation line numbers remain
+unchanged. Press `<C-s>` in normal or insert mode to save; press `<Esc>` or
+`<C-c>` to cancel.
 
 The quick-action picker mirrors Plannotator's direct **Deletion** and **👍 Looks
 good** actions. It then lists Plannotator's exact ten default quick labels:
@@ -165,6 +167,12 @@ Ensure no regression**, **🚫 Out of scope**, **🧪 Needs tests**, and **👍 
 approach**. The picker shows these compact labels only; their agent-facing tips
 remain part of exported and sent feedback. IDs, ordering, labels, and tips follow
 Plannotator's [`quickLabels.ts`](https://github.com/backnotprop/plannotator/blob/main/packages/ui/utils/quickLabels.ts).
+
+Attachment input, quick actions, annotation browsing, per-annotation actions,
+and clear confirmation use the same non-overlapping owned modal layout. Pickers
+support `j`/`k`, arrow keys, `<Enter>` to select, and `<Esc>`, `q`, or `<C-c>`
+to cancel. In a window too small to reserve a bordered float, the modal falls
+back to a temporary split rather than covering text.
 
 Global comments render immediately as virtual lines above the first assistant
 line. The panel shows a compact summary plus hints for `<leader>ng` (add) and
@@ -212,6 +220,9 @@ mode is deliberately rejected.
   and processes running as the same UID remain inside the trust boundary. The
   numeric locator is not a secret. Authentication tokens never enter buffers,
   drafts, clipboard output, or notifications.
+- Modal displacement uses display-only extmarks and restores the source view
+  and cursor on save, cancel, window close, or error. It never inserts buffer
+  lines or changes feedback anchors.
 
 Override the shared registry and Unix-socket directory for both processes with
 an absolute, short, owner-only path:

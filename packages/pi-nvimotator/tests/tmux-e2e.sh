@@ -210,6 +210,13 @@ grep -Fq 'Global feedback (1)' "$ARTIFACTS/global-panel.txt"
 grep -Fq 'Overall feedback.' "$ARTIFACTS/global-panel.txt"
 grep -Fq '\ng add · \nc manage' "$ARTIFACTS/global-panel.txt"
 [[ $(nvim_expr "luaeval('nvimotator_e2e.quick_line()')") == 4 ]]
+wait_file "$ARTIFACTS/modal-geometry.json"
+node - "$ARTIFACTS/modal-geometry.json" <<'NODE'
+const fs = require("fs"); const value = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (value.kind !== "float" || value.overlap !== 0 || value.occupiedRows !== value.floatHeight + 2) {
+  throw new Error("Nvimotator modal did not exclusively occupy displaced rows");
+}
+NODE
 nvim_expr "luaeval('nvimotator_e2e.export()')" >/dev/null
 wait_file "$EXPORT_PATH"
 grep -Fq 'NVIMOTATOR-E2E-BEGIN' "$EXPORT_PATH"

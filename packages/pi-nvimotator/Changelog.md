@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0
+
+- Added a shared displaced-window layout: temporary blank virtual lines move
+  real source rows below every owned modal, so floats never cover source text
+  without changing snapshot bytes or annotation line numbers.
+- Replaced delegated `vim.ui.input`/`vim.ui.select` dialogs with owned input,
+  picker, action, overview, and confirmation modals using the same layout.
+- Added view/cursor restoration, idempotent extmark cleanup, source-window width
+  bounds, a tiny-window split fallback, and headless/tmux geometry coverage.
+
 ## 0.2.0
 
 - Replaced host-wide IPv4 loopback TCP with authenticated protocol-v2 Unix
@@ -12,6 +22,7 @@
   prompted mapping.
 - README install path is now mise, Neovim 0.12, latest kickstart.nvim, then this
   package. lazy.nvim/LazyVim remains an alternative.
+
 ## 0.1.0
 
 - Initial `/nvim-last` Pi bridge and same-host cross-cwd Neovim attachment.
