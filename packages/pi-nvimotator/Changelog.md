@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- README install path is now mise, Neovim 0.12, latest kickstart.nvim, then this
+  package. lazy.nvim/LazyVim remains an alternative.
+
 ## 0.1.0
 
 - Initial `/nvim-last` Pi bridge and same-host cross-cwd Neovim attachment.

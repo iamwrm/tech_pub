@@ -11,15 +11,64 @@ Lifecycle and design: [`IV-0027`](../../docs/IV-DC/IV-0027-pi-nvimotator.md).
 
 - Pi 0.84.3 or newer
 - Node.js 22.19 or newer
-- Neovim 0.10 or newer
+- Neovim 0.10 or newer. Current kickstart.nvim uses `vim.pack` and needs 0.12.
 - Same machine and OS account for Pi and Neovim
+- `git` and `make` (kickstart clones plugins and builds `telescope-fzf-native`)
 
 ## Install
 
-Install both halves: the Pi extension creates bridges, while the Neovim plugin
-provides `:NvimotatorAttach` and the annotation UI.
+If you are starting from scratch, do these in order: mise, Neovim 0.12, latest
+kickstart.nvim, then this package. The Pi extension creates bridges. The
+Neovim plugin provides `:NvimotatorAttach` and the annotation UI.
 
-### 1. Install in Pi
+### 1. Install mise
+
+Official installer: https://mise.jdx.dev/installing-mise.html
+
+```bash
+curl https://mise.run | sh
+```
+
+Activate it in your shell. For zsh:
+
+```bash
+echo 'eval "$(~/.local/bin/mise activate zsh)"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+Bash uses `mise activate bash` and `~/.bashrc`. Fish uses `mise activate fish`
+and `~/.config/fish/config.fish`.
+
+### 2. Install Neovim
+
+```bash
+mise use -g neovim@0.12
+nvim --version
+```
+
+`neovim@0.12` tracks the current 0.12.x. Pin a patch if you want one, for
+example `neovim@0.12.5`.
+
+### 3. Install latest kickstart.nvim
+
+Backup any existing config, then clone upstream:
+
+```bash
+mv ~/.config/nvim ~/.config/nvim.bak
+git clone https://github.com/nvim-lua/kickstart.nvim.git "${XDG_CONFIG_HOME:-$HOME/.config}/nvim"
+nvim
+```
+
+The first launch installs plugins with `vim.pack`. Quit after it finishes.
+
+If `git clone` hangs inside Neovim, a GitHub `gh auth git-credential` helper
+can block non-TTY clones. Start `nvim` in a real terminal, or:
+
+```bash
+GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0= nvim
+```
+
+### 4. Install the Pi extension
 
 A local Pi path install does not install npm dependencies, so install them
 first, then register the package with Pi:
@@ -31,9 +80,24 @@ cd /absolute/path/to/piagent-config
 pi install ./packages/pi-nvimotator
 ```
 
-### 2. Install in Neovim with lazy.nvim or LazyVim
+### 5. Load the Neovim plugin on kickstart
 
-Create `~/.config/nvim/lua/plugins/pi-nvimotator.lua`:
+The plugin is a normal `plugin/` plus `lua/` tree. Put the package root on
+Neovim's runtimepath. `vim.pack` only clones git URIs, so a local path plugin
+cannot go through `vim.pack.add`.
+
+Create `~/.config/nvim/lua/custom/plugins/pi-nvimotator.lua`:
+
+```lua
+vim.opt.runtimepath:prepend '/absolute/path/to/piagent-config/packages/pi-nvimotator'
+```
+
+If `require 'custom.plugins'` is still commented in `init.lua`, uncomment it.
+Restart Neovim.
+
+### Already using lazy.nvim or LazyVim
+
+Skip the kickstart clone. Create `~/.config/nvim/lua/plugins/pi-nvimotator.lua`:
 
 ```lua
 return {
@@ -70,9 +134,9 @@ Nvimotator ready (16)
 nvim -c 'NvimotatorAttach 16'
 ```
 
-Run the command from any directory on the same host. The lazy.nvim/LazyVim
-installation above makes `:NvimotatorAttach` available, and the command opens
-the captured assistant message as an immutable Markdown scratch buffer.
+Run the command from any directory on the same host. The Neovim installation
+above makes `:NvimotatorAttach` available, and the command opens the captured
+assistant message as an immutable Markdown scratch buffer.
 
 | Neovim command | Action |
 | --- | --- |
