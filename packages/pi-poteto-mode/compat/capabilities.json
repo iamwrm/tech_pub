@@ -1,0 +1,19 @@
+{
+  "architect": ["cursor-model-routing", "cursor-subagents"],
+  "arena": ["cursor-model-routing", "cursor-subagents"],
+  "automate-me": ["cursor-rules", "cursor-skill-authoring"],
+  "blast-radius": ["cursor-subagents"],
+  "create-verification-skill": ["cursor-rules"],
+  "figure-it-out": ["cursor-subagents"],
+  "how": ["cursor-model-routing", "cursor-subagents"],
+  "interrogate": ["cursor-model-routing", "cursor-subagents"],
+  "maintain-verification-skill": ["cursor-rules"],
+  "no-comments": ["cursor-custom-agent"],
+  "recall": ["cursor-mcp"],
+  "reflect": ["cursor-model-routing", "cursor-subagents"],
+  "setup-pstack": ["cursor-model-routing", "cursor-rules"],
+  "show-me-your-work": ["cursor-rules", "cursor-subagents"],
+  "swarm": ["cursor-cloud-agent", "cursor-model-routing", "cursor-subagents"],
+  "teach": ["cursor-subagents"],
+  "why": ["cursor-mcp", "cursor-subagents"]
+}

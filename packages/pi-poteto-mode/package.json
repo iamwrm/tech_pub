@@ -1,0 +1,45 @@
+{
+  "name": "pi-poteto-mode",
+  "version": "0.1.0",
+  "description": "A pinned, filtered, Pi-compatible distribution of poteto's pstack skills.",
+  "private": true,
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "skills",
+    "poteto-mode",
+    "pstack"
+  ],
+  "files": [
+    "skills",
+    "vendor",
+    "compat",
+    "scripts",
+    "tests",
+    "README.md",
+    "Changelog.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "UPSTREAM.lock.json",
+    "sync-policy.json"
+  ],
+  "scripts": {
+    "sync:upstream": "node scripts/sync-upstream.mjs",
+    "sync:check": "node scripts/sync-upstream.mjs --check",
+    "validate": "node scripts/validate-skills.mjs",
+    "test": "npm run validate && npm run sync:check && node --test tests/*.test.mjs"
+  },
+  "pi": {
+    "skills": [
+      "./skills"
+    ]
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.3"
+  }
+}

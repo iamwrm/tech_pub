@@ -1,0 +1,73 @@
+{
+  "architect": [
+    "arena",
+    "how",
+    "interrogate",
+    "principle-exhaust-the-design-space",
+    "principle-fix-root-causes",
+    "principle-foundational-thinking",
+    "principle-outcome-oriented-execution",
+    "principle-redesign-from-first-principles",
+    "principle-subtract-before-you-add",
+    "why"
+  ],
+  "arena": [
+    "principle-prove-it-works",
+    "principle-redesign-from-first-principles",
+    "principle-separate-before-serializing-shared-state"
+  ],
+  "automate-me": ["poteto-mode", "unslop"],
+  "blast-radius": ["arena", "how", "unslop", "why"],
+  "create-verification-skill": ["maintain-verification-skill"],
+  "figure-it-out": [
+    "architect",
+    "arena",
+    "poteto-mode",
+    "principle-encode-lessons-in-structure",
+    "principle-foundational-thinking",
+    "principle-laziness-protocol",
+    "principle-never-block-on-the-human",
+    "principle-prove-it-works",
+    "principle-separate-before-serializing-shared-state",
+    "principle-sequence-verifiable-units",
+    "show-me-your-work"
+  ],
+  "maintain-verification-skill": ["create-verification-skill"],
+  "no-comments": [
+    "architect",
+    "how",
+    "principle-fix-root-causes",
+    "principle-redesign-from-first-principles",
+    "why"
+  ],
+  "poteto-mode": [
+    "principle-boundary-discipline",
+    "principle-build-the-lever",
+    "principle-encode-lessons-in-structure",
+    "principle-exhaust-the-design-space",
+    "principle-experience-first",
+    "principle-fix-root-causes",
+    "principle-foundational-thinking",
+    "principle-guard-the-context-window",
+    "principle-laziness-protocol",
+    "principle-make-operations-idempotent",
+    "principle-migrate-callers-then-delete-legacy-apis",
+    "principle-minimize-reader-load",
+    "principle-model-the-domain",
+    "principle-never-block-on-the-human",
+    "principle-outcome-oriented-execution",
+    "principle-prove-it-works",
+    "principle-redesign-from-first-principles",
+    "principle-separate-before-serializing-shared-state",
+    "principle-sequence-verifiable-units",
+    "principle-subtract-before-you-add",
+    "principle-type-system-discipline",
+    "technical-writing",
+    "unslop"
+  ],
+  "recall": ["unslop", "why"],
+  "reflect": ["principle-encode-lessons-in-structure"],
+  "show-me-your-work": ["principle-encode-lessons-in-structure", "unslop"],
+  "teach": ["how", "unslop", "why"],
+  "typescript-best-practices": ["principle-type-system-discipline"]
+}
