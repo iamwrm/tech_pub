@@ -12,6 +12,37 @@ local function ok(value, label)
   if not value then error(label or "assertion failed") end
 end
 
+local function window_footer(window)
+  local footer = vim.api.nvim_win_get_config(window).footer
+  if type(footer) == "string" then return footer end
+  if type(footer) ~= "table" then return tostring(footer or "") end
+  local parts = {}
+  for _, chunk in ipairs(footer) do
+    if type(chunk) == "string" then
+      parts[#parts + 1] = chunk
+    elseif type(chunk) == "table" then
+      parts[#parts + 1] = tostring(chunk[1] or "")
+    end
+  end
+  return table.concat(parts)
+end
+
+-- Same IDs/labels/order as src/protocol.ts QUICK_ACTIONS (emoji-prefixed names).
+local plannotator_quick_actions = {
+  { id = "deletion", label = "Deletion" },
+  { id = "thumbs-up", label = "👍 Looks good" },
+  { id = "clarify-this", label = "❓ Clarify this" },
+  { id = "missing-overview", label = "🗺️ Missing overview" },
+  { id = "verify-this", label = "🔍 Verify this" },
+  { id = "give-me-an-example", label = "🔬 Give me an example" },
+  { id = "match-existing-patterns", label = "🧬 Match existing patterns" },
+  { id = "consider-alternatives", label = "🔄 Consider alternatives" },
+  { id = "ensure-no-regression", label = "📉 Ensure no regression" },
+  { id = "out-of-scope", label = "🚫 Out of scope" },
+  { id = "needs-tests", label = "🧪 Needs tests" },
+  { id = "nice-approach", label = "👍 Nice approach" },
+}
+
 local scratch = require("pi_nvimotator.scratch")
 local annotations = require("pi_nvimotator.annotations")
 local draft = require("pi_nvimotator.draft")
@@ -95,6 +126,48 @@ local restored_source_view = vim.api.nvim_win_call(source_window, function() ret
 eq(restored_source_view.topline, source_view_before_modal.topline, "comment cleanup restores source topline")
 eq(restored_source_view.leftcol, source_view_before_modal.leftcol, "comment cleanup restores horizontal view")
 
+local paste_result
+local paste_window, paste_error = modal.comment({
+  title = "Paste comment",
+  source_window = source_window,
+  target_line = 2,
+}, function(value) paste_result = value == nil and "<nil>" or value end)
+ok(paste_window, paste_error)
+local paste_buffer = vim.api.nvim_win_get_buf(paste_window)
+eq(vim.bo[paste_buffer].buftype, "nofile", "comment editor is a scratch buffer")
+eq(vim.fn.maparg("<Esc>", "i", false, false), "", "comment editor has no insert Esc mapping")
+eq(vim.fn.maparg("<Esc>", "n", false, false), "", "comment editor has no normal Esc mapping")
+eq(vim.fn.maparg("<C-[>", "n", false, false), "", "comment editor has no C-[ mapping")
+local paste_ok, paste_err = pcall(vim.api.nvim_paste, "via nvim_paste", true, -1)
+ok(paste_ok, tostring(paste_err))
+eq(vim.api.nvim_buf_get_lines(paste_buffer, 0, -1, false), { "via nvim_paste" }, "nvim_paste inserts into the comment editor")
+ok(modal.is_open(), "nvim_paste does not close the comment editor")
+vim.api.nvim_buf_set_lines(paste_buffer, 0, -1, false, { "" })
+paste_ok, paste_err = pcall(function()
+  vim.api.nvim_paste("via ", false, 1)
+  vim.api.nvim_paste("bracketed paste", false, 2)
+  vim.api.nvim_paste("", false, 3)
+end)
+ok(paste_ok, tostring(paste_err))
+eq(vim.api.nvim_buf_get_lines(paste_buffer, 0, -1, false), { "via bracketed paste" },
+  "streamed nvim_paste matches terminal bracketed paste")
+ok(modal.is_open(), "streamed paste does not close the comment editor")
+-- Headless feedkeys has no TUI paste detector, so CSI 200~ is raw Esc+[... .
+-- The bug was that mapped insert Esc cancelled; unmapped Esc must not close.
+vim.api.nvim_feedkeys("i" .. "\x1b[200~ignored-in-headless\x1b[201~", "mtx", false)
+ok(modal.is_open(), "bracketed-paste CSI prefix does not cancel the comment editor")
+vim.api.nvim_buf_set_lines(paste_buffer, 0, -1, false, { "via bracketed paste" })
+vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "mtx", false)
+ok(modal.is_open(), "insert Esc does not cancel the comment editor")
+vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "mtx", false)
+ok(modal.is_open(), "normal Esc does not cancel the comment editor")
+vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<C-[>", true, false, true), "mtx", false)
+ok(modal.is_open(), "C-[ does not cancel the comment editor")
+vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<C-s>", true, false, true), "mx", false)
+ok(vim.wait(1000, function() return paste_result ~= nil end), "comment submit after paste")
+eq(paste_result, "via bracketed paste", "submit keeps pasted comment text")
+eq(modal.is_open(), false, "comment editor closed after paste submit")
+
 local selected_quick_action
 local quick_actions = {
   { id = "deletion", label = "Deletion", description = "I don't want this in the message." },
@@ -110,6 +183,169 @@ vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<CR>", true, false, true),
 ok(vim.wait(1000, function() return selected_quick_action ~= nil end), "quick picker callback")
 eq(selected_quick_action.id, "missing-overview", "quick picker returns the full selected action")
 eq(#vim.api.nvim_buf_get_extmarks(bufnr, layout.namespace(), 0, -1, {}), 0, "quick picker cleanup removes displacement")
+
+local cancelled_quick = "unset"
+local notify_notes = {}
+local original_notify = vim.notify
+vim.notify = function(message, ...)
+  notify_notes[#notify_notes + 1] = tostring(message)
+  return original_notify(message, ...)
+end
+local cancel_quick_window, cancel_quick_error = modal.quick(quick_actions, function(action)
+  cancelled_quick = action
+end)
+ok(cancel_quick_window, cancel_quick_error)
+local visual_enter = vim.fn.maparg("<CR>", "x", false, true)
+ok(type(visual_enter) == "table" and visual_enter.lhs ~= nil, "picker maps Enter in visual mode")
+vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<C-c>", true, false, true), "mx", false)
+ok(vim.wait(1000, function() return not modal.is_open() end), "quick picker C-c closes")
+vim.wait(50)
+eq(cancelled_quick, "unset", "quick cancel does not invoke the selection callback")
+for _, note in ipairs(notify_notes) do
+  ok(not note:lower():find("invalid", 1, true), "quick cancel does not warn: " .. note)
+end
+
+local filtered_action = "unset"
+local filter_window, filter_error = modal.quick(plannotator_quick_actions, function(action)
+  filtered_action = action
+end)
+ok(filter_window, filter_error)
+eq(#vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(filter_window), 0, -1, false), 12,
+  "empty filter shows every default quick action")
+ok(window_footer(filter_window):find("type to filter", 1, true), "idle picker footer hints typing filters")
+vim.api.nvim_set_current_win(filter_window)
+vim.api.nvim_feedkeys("L", "mx", false)
+eq(vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(filter_window), 0, -1, false), { "👍 Looks good" },
+  "prefix L leaves only Looks good among default actions")
+eq(modal._active().filter_query, "l", "L is a case-insensitive prefix query")
+eq(#modal._active().filtered, 1, "filtered list has one row")
+eq(modal._active().filtered[1].item.id, "thumbs-up", "filtered row keeps the original action object")
+ok(window_footer(filter_window):find("filter:", 1, true), "active filter is shown in the footer")
+vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<CR>", true, false, true), "mx", false)
+ok(vim.wait(1000, function() return filtered_action ~= "unset" end), "filtered Enter invokes the callback")
+eq(filtered_action.id, "thumbs-up", "filtered Enter selects Looks good, not a stale index")
+
+local nomatch_action = "unset"
+local nomatch_window, nomatch_error = modal.quick(plannotator_quick_actions, function(action)
+  nomatch_action = action
+end)
+ok(nomatch_window, nomatch_error)
+vim.api.nvim_set_current_win(nomatch_window)
+vim.api.nvim_feedkeys("z", "mx", false)
+eq(vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(nomatch_window), 0, -1, false), { "(no matches)" },
+  "non-matching prefix shows a placeholder")
+eq(#modal._active().filtered, 0, "non-matching prefix has no selectable rows")
+vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<CR>", true, false, true), "mx", false)
+vim.wait(50)
+ok(modal.is_open(), "Enter on no matches does not close the picker")
+eq(nomatch_action, "unset", "Enter on no matches does not select garbage")
+vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<BS>", true, false, true), "mx", false)
+eq(#vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(nomatch_window), 0, -1, false), 12,
+  "Backspace restores the full list")
+vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<C-c>", true, false, true), "mx", false)
+ok(vim.wait(1000, function() return not modal.is_open() end), "filter picker C-c closes")
+vim.wait(50)
+eq(nomatch_action, "unset", "filter picker cancel still nil-guards")
+
+local nvimotator = require("pi_nvimotator")
+local quick_store = annotations.Store.new(bufnr, function() end)
+local plugin_state = nvimotator._state()
+local saved_plugin_state = {
+  phase = plugin_state.phase,
+  store = plugin_state.store,
+  bufnr = plugin_state.bufnr,
+  actions = plugin_state.actions,
+  generation = plugin_state.generation,
+  snapshot = plugin_state.snapshot,
+}
+plugin_state.phase = "ready"
+plugin_state.store = quick_store
+plugin_state.bufnr = bufnr
+plugin_state.actions = quick_actions
+plugin_state.generation = 1
+plugin_state.snapshot = {
+  instanceId = "instance-quick",
+  sessionId = "session-quick",
+  snapshotId = "snapshot-headless",
+  entryId = "entry-quick",
+  messageHash = string.rep("b", 64),
+}
+notify_notes = {}
+vim.api.nvim_set_current_win(source_window)
+nvimotator.quick_range(2, 2)
+ok(modal.is_open(), "quick_range opens the owned picker")
+eq(modal._active().lease.target_line, 2, "quick_range displaces at the range end")
+vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<C-c>", true, false, true), "mx", false)
+ok(vim.wait(1000, function() return not modal.is_open() end), "quick_range C-c closes")
+vim.wait(50)
+eq(quick_store:count(), 0, "quick_range cancel does not add an annotation")
+for _, note in ipairs(notify_notes) do
+  ok(not note:find("quick action is invalid", 1, true), "quick_range cancel stays silent: " .. note)
+end
+
+vim.api.nvim_set_current_win(source_window)
+vim.api.nvim_win_set_cursor(source_window, { 2, 0 })
+vim.cmd("normal! V")
+nvimotator.quick_visual()
+ok(modal.is_open(), "quick_visual opens from linewise visual")
+eq(vim.fn.mode(1):sub(1, 1), "n", "quick picker leaves visual mode")
+local visual_picker = assert(modal._active(), "visual quick picker")
+vim.api.nvim_win_set_cursor(visual_picker.lease.window, { 1, 0 })
+vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<CR>", true, false, true), "mx", false)
+ok(vim.wait(1000, function() return quick_store:count() == 1 end), "visual quick Enter saves the action")
+eq(quick_store:list()[1].actionId, "deletion", "visual quick stores the selected action")
+quick_store:clear()
+
+plugin_state.actions = plannotator_quick_actions
+notify_notes = {}
+vim.api.nvim_set_current_win(source_window)
+nvimotator.quick_range(2, 2)
+ok(modal.is_open(), "quick_range opens the default-action picker")
+vim.api.nvim_set_current_win(modal._active().lease.window)
+vim.api.nvim_feedkeys("L", "mx", false)
+eq(vim.api.nvim_buf_get_lines(modal._active().buffer, 0, -1, false), { "👍 Looks good" },
+  "quick_range prefix L leaves only Looks good")
+vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<CR>", true, false, true), "mx", false)
+ok(vim.wait(1000, function() return quick_store:count() == 1 end), "filtered Enter saves the action")
+eq(quick_store:list()[1].actionId, "thumbs-up", "filtered Enter add_action stores Looks good")
+for _, note in ipairs(notify_notes) do
+  ok(not note:find("quick action is invalid", 1, true), "filtered save stays silent: " .. note)
+end
+quick_store:clear()
+plugin_state.actions = quick_actions
+
+vim.cmd("belowright 20new")
+local probe_win = vim.api.nvim_get_current_win()
+local probe_buf = vim.api.nvim_get_current_buf()
+local many_lines = {}
+for i = 1, 80 do many_lines[i] = "line " .. i end
+vim.bo[probe_buf].buftype = "nofile"
+vim.api.nvim_buf_set_lines(probe_buf, 0, -1, true, many_lines)
+vim.wo[probe_win].scrolloff = 10
+vim.api.nvim_win_set_cursor(probe_win, { 80, 0 })
+local last_window, last_error = modal.quick(quick_actions, function() end, {
+  source_window = probe_win,
+  target_line = 80,
+})
+ok(last_window, last_error)
+ok(modal.is_open(), "last-line picker opens under scrolloff")
+local last_lease = modal._active().lease
+if last_lease.kind == "float" then
+  eq(vim.wo[probe_win].scrolloff, 0, "float layout pins scrolloff while open")
+end
+modal.close()
+ok(vim.wait(1000, function() return not modal.is_open() end), "last-line picker closes")
+eq(vim.wo[probe_win].scrolloff, 10, "layout restores scrolloff after last-line picker")
+if vim.api.nvim_win_is_valid(probe_win) then vim.api.nvim_win_close(probe_win, true) end
+vim.api.nvim_set_current_win(source_window)
+
+plugin_state.phase = saved_plugin_state.phase
+plugin_state.store = saved_plugin_state.store
+plugin_state.bufnr = saved_plugin_state.bufnr
+plugin_state.actions = saved_plugin_state.actions
+plugin_state.generation = saved_plugin_state.generation
+plugin_state.snapshot = saved_plugin_state.snapshot
+vim.notify = original_notify
 
 local line_anchor = scratch.line_anchor(bufnr, 2, 3)
 eq(line_anchor, {
@@ -199,7 +435,6 @@ vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<CR>", true, false, true),
 ok(vim.wait(1000, function() return confirmed end), "owned confirmation callback")
 eq(#vim.api.nvim_buf_get_extmarks(bufnr, layout.namespace(), 0, -1, {}), 0, "confirmation cleanup removes displacement")
 
-local nvimotator = require("pi_nvimotator")
 local original_attach = nvimotator.attach
 local prompted_id
 nvimotator.attach = function(value) prompted_id = value end
@@ -215,8 +450,12 @@ eq(prompted_id, "16", "prompted attach trims and forwards the bridge ID")
 eq(vim.api.nvim_get_current_win(), attach_source, "attach input restores source window")
 prompted_id = nil
 nvimotator.attach_prompt()
+ok(modal.is_open(), "attach input reopened")
 vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "mx", false)
-ok(vim.wait(1000, function() return not modal.is_open() end), "attach input cancel closes")
+ok(modal.is_open(), "attach input Esc does not cancel")
+eq(prompted_id, nil, "Esc does not submit the attach prompt")
+vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<C-c>", true, false, true), "mx", false)
+ok(vim.wait(1000, function() return not modal.is_open() end), "attach input C-c cancel closes")
 eq(prompted_id, nil, "cancelled attach prompt does nothing")
 nvimotator.attach = original_attach
 
@@ -226,7 +465,7 @@ pcall(vim.api.nvim_win_set_height, tiny_source, 3)
 local tiny_window, tiny_error = modal.input({ prompt = "Tiny", source_window = tiny_source }, function() end)
 ok(tiny_window, tiny_error)
 eq(modal._active().lease.kind, "split", "tiny source window uses non-overlapping split fallback")
-vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "mx", false)
+vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<C-c>", true, false, true), "mx", false)
 ok(vim.wait(1000, function() return not modal.is_open() end), "split fallback closes")
 if vim.api.nvim_win_is_valid(tiny_source) then vim.api.nvim_win_close(tiny_source, true) end
 vim.api.nvim_set_current_win(source_window)

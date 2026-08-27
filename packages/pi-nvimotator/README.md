@@ -5,8 +5,6 @@ annotating the latest assistant response. Run `/nvim-last`, attach to its small
 numeric ID from any same-host shell, then send structured line/selection
 feedback or copy the exact same Plannotator-wrapped prompt.
 
-Lifecycle and design: [`IV-0027`](../../docs/IV-DC/IV-0027-pi-nvimotator.md).
-
 ## Requirements
 
 - Pi 0.84.3 or newer
@@ -77,9 +75,9 @@ A local Pi path install does not install npm dependencies, so install them
 first, then register the package with Pi:
 
 ```bash
-cd /absolute/path/to/piagent-config/packages/pi-nvimotator
+cd /absolute/path/to/tech_pub/packages/pi-nvimotator
 npm ci
-cd /absolute/path/to/piagent-config
+cd /absolute/path/to/tech_pub
 pi install ./packages/pi-nvimotator
 ```
 
@@ -92,7 +90,7 @@ cannot go through `vim.pack.add`.
 Create `~/.config/nvim/lua/custom/plugins/pi-nvimotator.lua`:
 
 ```lua
-vim.opt.runtimepath:prepend '/absolute/path/to/piagent-config/packages/pi-nvimotator'
+vim.opt.runtimepath:prepend '/absolute/path/to/tech_pub/packages/pi-nvimotator'
 ```
 
 If `require 'custom.plugins'` is still commented in `init.lua`, uncomment it.
@@ -106,7 +104,7 @@ Skip the kickstart clone. Create `~/.config/nvim/lua/plugins/pi-nvimotator.lua`:
 return {
   {
     name = "pi-nvimotator",
-    dir = "/absolute/path/to/piagent-config/packages/pi-nvimotator",
+    dir = "/absolute/path/to/tech_pub/packages/pi-nvimotator",
     lazy = false,
   },
 }
@@ -156,8 +154,11 @@ assistant message as an immutable Markdown scratch buffer.
 Comments open in a rounded multiline Markdown editor below the selected line.
 Temporary blank virtual lines displace the following source rows, so the float
 covers no source text while snapshot bytes and annotation line numbers remain
-unchanged. Press `<C-s>` in normal or insert mode to save; press `<Esc>` or
-`<C-c>` to cancel.
+unchanged. The editor is a normal `buftype=nofile` scratch buffer, so insert,
+normal, visual, and default Vim keys work, including terminal Ctrl-V / bracketed
+paste. Press `<C-s>` in normal or insert mode to save; press `<C-c>` to cancel.
+`<Esc>` and `<C-[>` do not close the popup: insert Esc leaves insert, and
+normal Esc is a no-op.
 
 The quick-action picker mirrors Plannotator's direct **Deletion** and **👍 Looks
 good** actions. It then lists Plannotator's exact ten default quick labels:
@@ -170,9 +171,13 @@ Plannotator's [`quickLabels.ts`](https://github.com/backnotprop/plannotator/blob
 
 Attachment input, quick actions, annotation browsing, per-annotation actions,
 and clear confirmation use the same non-overlapping owned modal layout. Pickers
-support `j`/`k`, arrow keys, `<Enter>` to select, and `<Esc>`, `q`, or `<C-c>`
-to cancel. In a window too small to reserve a bordered float, the modal falls
-back to a temporary split rather than covering text.
+support typing a prefix to filter labels (case-insensitive; a leading emoji is
+ignored, so `L` leaves **Looks good**), `j`/`k`, arrow keys, `<Enter>` to select,
+and `q` or `<C-c>` to cancel.
+`<Esc>` does not close pickers. Cancel does not record an annotation. In a window
+too small to reserve a bordered float, or when the target line cannot be located
+on screen after displacement, the modal falls back to a temporary split rather
+than covering text.
 
 Global comments render immediately as virtual lines above the first assistant
 line. The panel shows a compact summary plus hints for `<leader>ng` (add) and

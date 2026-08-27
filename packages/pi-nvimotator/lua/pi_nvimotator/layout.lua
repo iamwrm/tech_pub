@@ -26,17 +26,54 @@ local function source_state(source_window, target_line)
   return source_buffer, target, cursor, view
 end
 
+local function restore_scrolloff(lease)
+  if lease.previous_scrolloff == nil or not valid_window(lease.source_window) then return end
+  pcall(function()
+    vim.wo[lease.source_window].scrolloff = lease.previous_scrolloff
+  end)
+  lease.previous_scrolloff = nil
+end
+
 local function restore_source(lease)
   if lease.extmark and valid_buffer(lease.source_buffer) then
     pcall(vim.api.nvim_buf_del_extmark, lease.source_buffer, namespace, lease.extmark)
     lease.extmark = nil
   end
+  restore_scrolloff(lease)
   if not valid_window(lease.source_window) then return end
   if vim.api.nvim_win_get_buf(lease.source_window) ~= lease.source_buffer then return end
   pcall(vim.api.nvim_win_call, lease.source_window, function()
     pcall(vim.api.nvim_win_set_cursor, lease.source_window, lease.source_cursor)
     vim.fn.winrestview(lease.source_view)
   end)
+end
+
+local function leave_visual()
+  local mode = vim.fn.mode(1)
+  if mode == "v" or mode == "V" or mode == "\22" then
+    pcall(vim.cmd.normal, { bang = true, args = { "\27" }, mods = { silent = true } })
+  end
+end
+
+local function locate_line(source_window, target_line)
+  vim.cmd("redraw")
+  local screen = vim.fn.screenpos(source_window, target_line, 1)
+  if type(screen) == "table" and screen.row ~= 0 then return screen end
+  pcall(vim.api.nvim_win_call, source_window, function()
+    vim.fn.winrestview({
+      lnum = target_line,
+      col = 0,
+      coladd = 0,
+      curswant = 0,
+      leftcol = 0,
+      topline = target_line,
+      topfill = 0,
+    })
+  end)
+  vim.cmd("redraw")
+  screen = vim.fn.screenpos(source_window, target_line, 1)
+  if type(screen) == "table" and screen.row ~= 0 then return screen end
+  return nil
 end
 
 local function open_split(buffer, options, lease)
@@ -84,20 +121,23 @@ function M.open(buffer, options)
     virt_lines_above = false,
   })
 
+  lease.previous_scrolloff = vim.wo[source_window].scrolloff
   local positioned = pcall(vim.api.nvim_win_call, source_window, function()
+    leave_visual()
+    vim.wo.scrolloff = 0
     vim.api.nvim_win_set_cursor(source_window, { target_line, 0 })
     vim.cmd("normal! zt")
   end)
   if not positioned then
     restore_source(lease)
-    return nil, "Could not position the Nvimotator source window."
+    return open_split(buffer, options, lease)
   end
 
-  local screen = vim.fn.screenpos(source_window, target_line, 1)
+  local screen = locate_line(source_window, target_line)
   local window_position = vim.api.nvim_win_get_position(source_window)
-  if type(screen) ~= "table" or screen.row == 0 then
+  if not screen then
     restore_source(lease)
-    return nil, "Could not locate the Nvimotator source line on screen."
+    return open_split(buffer, options, lease)
   end
   local config = {
     relative = "editor",

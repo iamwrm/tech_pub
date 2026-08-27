@@ -1,6 +1,6 @@
 {
   "name": "pi-nvimotator",
-  "version": "0.3.0",
+  "version": "0.3.2",
   "description": "Pi extension and Neovim plugin for annotating the latest assistant message from any same-host shell.",
   "private": true,
   "type": "module",
