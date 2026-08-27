@@ -67,9 +67,15 @@ end
 
 local function cancel_mappings(buffer)
   local options = { buffer = buffer, silent = true, nowait = true }
-  vim.keymap.set({ "n", "i" }, "<Esc>", function() finish(nil) end, options)
-  vim.keymap.set("n", "q", function() finish(nil) end, options)
+  -- Text editors are real scratch buffers: do not map <Esc>/<C-[>. Insert Esc
+  -- leaves insert; normal Esc is a no-op. Mapping Esc with nowait swallows
+  -- terminal bracketed paste (CSI 200~) on Windows Terminal / Herdr.
   vim.keymap.set({ "n", "i" }, "<C-c>", function() finish(nil) end, options)
+end
+
+local function picker_cancel_mappings(buffer)
+  cancel_mappings(buffer)
+  vim.keymap.set("n", "q", function() finish(nil) end, { buffer = buffer, silent = true, nowait = true })
 end
 
 function M.comment(options, callback)
@@ -85,7 +91,7 @@ function M.comment(options, callback)
     width = width,
     height = options.height or 8,
     title = title_text(options.title or "Nvimotator comment", width),
-    footer = " <C-s> save · <Esc> cancel ",
+    footer = " <C-s> save · <C-c> cancel ",
   }, callback)
   if not window then
     pcall(vim.api.nvim_buf_delete, buffer, { force = true })
@@ -125,7 +131,7 @@ function M.input(options, callback)
     width = width,
     height = 1,
     title = title_text(options.prompt or "Nvimotator input", width),
-    footer = " <Enter> accept · <Esc> cancel ",
+    footer = " <Enter> accept · <C-c> cancel ",
   }, callback)
   if not window then
     pcall(vim.api.nvim_buf_delete, buffer, { force = true })
@@ -150,6 +156,21 @@ function M.input(options, callback)
   return window
 end
 
+local function picker_search_text(label)
+  local text = tostring(label)
+  -- Prefix-match the visible name after leading emoji/punctuation (so `L`
+  -- matches "👍 Looks good" without being fuzzy).
+  local stripped = text:gsub("^[^%a]*", "")
+  return vim.fn.tolower(text), vim.fn.tolower(stripped)
+end
+
+local function picker_prefix_match(label, query)
+  if query == "" then return true end
+  local needle = vim.fn.tolower(query)
+  local full, stripped = picker_search_text(label)
+  return vim.startswith(full, needle) or vim.startswith(stripped, needle)
+end
+
 function M.select(items, options, callback)
   options = options or {}
   if #items == 0 then return nil, "Nvimotator picker has no items" end
@@ -161,6 +182,8 @@ function M.select(items, options, callback)
     table.insert(labels, value)
     width = math.max(width, vim.fn.strdisplaywidth(value) + 2)
   end
+  local footer_idle = " type to filter · j/k move · <Enter> select · q/<C-c> cancel "
+  width = math.max(width, vim.fn.strdisplaywidth(footer_idle) + 2)
   width = math.min(options.width or 80, width)
   local buffer = create_buffer("select", "nvimotator")
   vim.api.nvim_buf_set_lines(buffer, 0, -1, false, labels)
@@ -171,7 +194,7 @@ function M.select(items, options, callback)
     width = width,
     height = math.min(#items, options.height or 10),
     title = title_text(options.prompt or "Nvimotator", width),
-    footer = " j/k move · <Enter> select · <Esc> cancel ",
+    footer = footer_idle,
   }, callback)
   if not window then
     pcall(vim.api.nvim_buf_delete, buffer, { force = true })
@@ -179,25 +202,154 @@ function M.select(items, options, callback)
   end
   common_window_options(window, false)
   vim.wo[window].cursorline = true
-  local function choose()
-    local row = vim.api.nvim_win_get_cursor(window)[1]
-    finish(items[row])
+
+  local query = ""
+  local filtered = {}
+  for index, item in ipairs(items) do
+    filtered[index] = { item = item, label = labels[index] }
   end
+
+  local function footer_text()
+    if query == "" then return footer_idle end
+    return string.format(" filter: %s · <BS>/<C-u> · <Enter> · q/<C-c> ", query)
+  end
+
+  local function refresh_footer()
+    if not valid_window(window) then return end
+    local config = vim.api.nvim_win_get_config(window)
+    if config.relative == nil or config.relative == "" then return end
+    pcall(vim.api.nvim_win_set_config, window, {
+      footer = footer_text(),
+      footer_pos = "center",
+    })
+  end
+
+  local function selected_item()
+    if not valid_window(window) or #filtered == 0 then return nil end
+    local row = vim.api.nvim_win_get_cursor(window)[1]
+    local entry = filtered[row]
+    return entry and entry.item or nil
+  end
+
+  local function render()
+    if not valid_buffer(buffer) then return end
+    local keep = selected_item()
+    filtered = {}
+    local lines = {}
+    for index, item in ipairs(items) do
+      local label = labels[index]
+      if picker_prefix_match(label, query) then
+        table.insert(filtered, { item = item, label = label })
+        table.insert(lines, label)
+      end
+    end
+    vim.bo[buffer].modifiable = true
+    if #lines == 0 then
+      vim.api.nvim_buf_set_lines(buffer, 0, -1, false, { "(no matches)" })
+    else
+      vim.api.nvim_buf_set_lines(buffer, 0, -1, false, lines)
+    end
+    vim.bo[buffer].modifiable = false
+    if valid_window(window) and #filtered > 0 then
+      local row = 1
+      if keep then
+        for index, entry in ipairs(filtered) do
+          if entry.item == keep then row = index; break end
+        end
+      end
+      pcall(vim.api.nvim_win_set_cursor, window, { row, 0 })
+    end
+    refresh_footer()
+    if active and active.buffer == buffer then
+      active.filter_query = query
+      active.filtered = filtered
+    end
+  end
+
+  local function choose()
+    if #filtered == 0 then return end
+    if not valid_window(window) then finish(nil); return end
+    local row = vim.api.nvim_win_get_cursor(window)[1]
+    local entry = filtered[row]
+    if not entry then return end
+    finish(entry.item)
+  end
+
+  local function move(delta)
+    if not valid_window(window) or #filtered == 0 then return end
+    local row = vim.api.nvim_win_get_cursor(window)[1]
+    vim.api.nvim_win_set_cursor(window, { math.max(1, math.min(#filtered, row + delta)), 0 })
+  end
+
   local map_options = { buffer = buffer, silent = true, nowait = true }
-  vim.keymap.set("n", "<CR>", choose, map_options)
-  vim.keymap.set("n", "j", "j", map_options)
-  vim.keymap.set("n", "k", "k", map_options)
-  vim.keymap.set("n", "<Down>", "j", map_options)
-  vim.keymap.set("n", "<Up>", "k", map_options)
-  cancel_mappings(buffer)
+  -- Pickers are not text editors. Map <CR> in visual/insert too so a leftover
+  -- visual mapping or unscheduled insert state still selects instead of no-op.
+  vim.keymap.set({ "n", "i", "x" }, "<CR>", choose, map_options)
+  vim.keymap.set("n", "j", function() move(1) end, map_options)
+  vim.keymap.set("n", "k", function() move(-1) end, map_options)
+  vim.keymap.set("n", "<Down>", function() move(1) end, map_options)
+  vim.keymap.set("n", "<Up>", function() move(-1) end, map_options)
+  vim.keymap.set("n", "<C-n>", function() move(1) end, map_options)
+  vim.keymap.set("n", "<C-p>", function() move(-1) end, map_options)
+  vim.keymap.set("n", "<BS>", function()
+    query = query:sub(1, math.max(0, #query - 1))
+    render()
+  end, map_options)
+  vim.keymap.set("n", "<C-h>", function()
+    query = query:sub(1, math.max(0, #query - 1))
+    render()
+  end, map_options)
+  vim.keymap.set("n", "<C-u>", function()
+    query = ""
+    render()
+  end, map_options)
+  -- Lua 5.1/LuaJIT reuses loop locals; bind through a function so each key
+  -- keeps its own character. j/k move and q cancels; other letters filter.
+  local function bind_filter_key(key, chunk)
+    vim.keymap.set("n", key, function()
+      query = query .. chunk
+      render()
+    end, map_options)
+  end
+  for byte = string.byte("a"), string.byte("z") do
+    local letter = string.char(byte)
+    if letter ~= "j" and letter ~= "k" and letter ~= "q" then
+      bind_filter_key(letter, letter)
+      bind_filter_key(letter:upper(), letter)
+    end
+  end
+  for digit = 0, 9 do
+    local key = tostring(digit)
+    bind_filter_key(key, key)
+  end
+  picker_cancel_mappings(buffer)
+  if active and active.buffer == buffer then
+    active.filter_query = query
+    active.filtered = filtered
+  end
+  vim.schedule(function()
+    if valid_window(window) then
+      vim.api.nvim_set_current_win(window)
+      pcall(vim.cmd.stopinsert)
+    end
+  end)
   return window
 end
 
-function M.quick(actions, callback)
+function M.quick(actions, callback, options)
+  options = options or {}
   return M.select(actions, {
     prompt = "Nvimotator quick action",
     format_item = function(action) return action.label end,
-  }, callback)
+    source_window = options.source_window,
+    target_line = options.target_line,
+    height = options.height or #actions,
+  }, function(action)
+    -- Owned picker cancel/WinClosed calls finish(nil). The pre-in-place
+    -- vim.ui.select wrapper ignored nil; without this, add_action(nil) warns
+    -- "Nvimotator quick action is invalid."
+    if action then callback(action) end
+  end)
 end
 
 local function label(record)

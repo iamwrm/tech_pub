@@ -160,10 +160,13 @@ end
 local function add_quick(anchor)
   local generation = state.generation
   local _, modal_error = modal.quick(state.actions, function(action)
-    if generation ~= state.generation or not ensure_ready(false) then return end
+    if not action or generation ~= state.generation or not ensure_ready(false) then return end
     local id, add_error = state.store:add_action(anchor, action)
     if not id then notify(add_error, vim.log.levels.WARN) end
-  end)
+  end, {
+    source_window = vim.api.nvim_get_current_win(),
+    target_line = anchor and anchor.endLine or nil,
+  })
   if modal_error then notify("Could not open quick-action picker: " .. modal_error, vim.log.levels.ERROR) end
 end
 

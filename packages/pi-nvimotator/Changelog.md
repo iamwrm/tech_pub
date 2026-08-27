@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.3.2
+
+- Quick Action no longer treats picker cancel/`WinClosed` as a selected action.
+  The in-place owned picker forwarded `nil` into `add_action`, which
+  warned `Nvimotator quick action is invalid.` Restored the old `vim.ui.select`
+  nil-guard, pass the source window and range end into the layout lease, leave
+  visual before positioning, and fall back to the existing split when the
+  displaced line cannot be located on screen.
+- Owned pickers restore incremental prefix filtering (the in-place static list
+  had dropped `vim.ui.select`/dressing type-to-filter). Typing letters matches
+  `action.label` case-insensitively, ignoring a leading emoji so `L` leaves
+  only **Looks good**. Backspace/`<C-h>`/`<C-u>` edit the query; Enter selects
+  the filtered row's original action object; a non-matching prefix shows a
+  placeholder and does not save. Footer hints `type to filter`.
+
+## 0.3.1
+
+- Comment and one-line input popups are ordinary `buftype=nofile` scratch
+  buffers: `<Esc>` / `<C-[>` no longer cancel. Insert Esc leaves insert;
+  normal Esc is a no-op. Cancel is `<C-c>`; comment save remains `<C-s>`.
+  This stops Windows Terminal / Herdr Ctrl-V bracketed paste (CSI `200~`)
+  from being swallowed by a `nowait` insert-mode Esc mapping.
+
 ## 0.3.0
 
 - Added a shared displaced-window layout: temporary blank virtual lines move

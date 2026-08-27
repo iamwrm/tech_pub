@@ -15,6 +15,6 @@ PI_NVIMOTATOR_PACKAGE="$PACKAGE_ROOT" \
 PI_NVIMOTATOR_TEST_ROOT="$TEST_ROOT" \
 PI_NVIMOTATOR_REGISTRY="$TEST_ROOT/registry" \
 nvim --headless -u NONE -i NONE \
-  --cmd "set runtimepath^=$PACKAGE_ROOT" \
+  --cmd "set runtimepath^=$PACKAGE_ROOT noshowmode" \
   -c "runtime plugin/pi_nvimotator.lua" \
   -l "$PACKAGE_ROOT/tests/nvim_spec.lua"
