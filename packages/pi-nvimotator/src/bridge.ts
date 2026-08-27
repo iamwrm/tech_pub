@@ -254,7 +254,19 @@ export class NvimotatorBridge {
     try {
       if (request.type === "ping") return { response: { ...base, type: "pong" }, finish: false };
       if (request.type === "snapshot") {
-        return { response: { ...base, type: "snapshot", entryId: this.snapshot.entryId, messageHash: this.snapshot.messageHash, text: this.snapshot.text, quickActions: getQuickActions() }, finish: false };
+        return {
+          response: {
+            ...base,
+            type: "snapshot",
+            entryId: this.snapshot.entryId,
+            messageHash: this.snapshot.messageHash,
+            text: this.snapshot.text,
+            quickActions: getQuickActions(),
+            kind: this.snapshot.kind ?? "message",
+            ...(this.snapshot.kind === "file" && this.snapshot.filePath ? { filePath: this.snapshot.filePath } : {}),
+          },
+          finish: false,
+        };
       }
       if (request.type === "render") {
         const prompt = this.submissions.render(request.submissionId, request.annotations);

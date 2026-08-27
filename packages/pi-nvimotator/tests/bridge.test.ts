@@ -78,6 +78,8 @@ test("owner-only Unix bridge authenticates, refreshes, renders, deduplicates, an
 
     const snapshotResponse = await exchange(manifest, request(manifest, "snapshot"));
     assert.equal(snapshotResponse.ok, true);
+    assert.equal(snapshotResponse.kind, "message");
+    assert.equal(snapshotResponse.filePath, undefined);
     assert.equal(snapshotResponse.text, "alpha\nomega");
     assert.deepEqual(snapshotResponse.quickActions.map((action: any) => action.id), [
       "deletion", "thumbs-up", "clarify-this", "missing-overview", "verify-this", "give-me-an-example",

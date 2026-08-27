@@ -42,7 +42,7 @@ local function ensure_ready(require_buffer)
     return false
   end
   if require_buffer and vim.api.nvim_get_current_buf() ~= state.bufnr then
-    notify("Annotations must be created from the Nvimotator assistant buffer.", vim.log.levels.WARN)
+    notify("Annotations must be created from the Nvimotator snapshot buffer.", vim.log.levels.WARN)
     return false
   end
   return true

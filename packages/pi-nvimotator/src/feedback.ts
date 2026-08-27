@@ -1,6 +1,9 @@
 import { TextDecoder } from "node:util";
 import { loadConfig } from "@plannotator/pi-extension/generated/config.ts";
-import { getAnnotateMessageFeedbackPrompt } from "@plannotator/pi-extension/generated/prompts.ts";
+import {
+  getAnnotateFileFeedbackPrompt,
+  getAnnotateMessageFeedbackPrompt,
+} from "@plannotator/pi-extension/generated/prompts.ts";
 import type { MessageSnapshot } from "./assistant-message.ts";
 import {
   MAX_EXCERPT_BYTES,
@@ -48,7 +51,7 @@ function decodeSlice(bytes: Buffer, start: number, end: number): string {
 
 function excerptWithReader(snapshot: MessageSnapshot, anchor: TextAnchor, lineBytes: LineBytes): string {
   if (anchor.startLine < 1 || anchor.endLine > snapshot.lines.length || anchor.endLine < anchor.startLine) {
-    throw new FeedbackError("Annotation line range is outside the assistant message.");
+    throw new FeedbackError("Annotation line range is outside the captured snapshot.");
   }
   if (anchor.endLine - anchor.startLine + 1 > MAX_SELECTED_LINES) {
     throw new FeedbackError(`One annotation cannot span more than ${MAX_SELECTED_LINES} lines.`);
@@ -103,14 +106,20 @@ function quote(text: string): string {
   return text.split("\n").map((line) => `> ${line}`).join("\n");
 }
 
+function isFileSnapshot(snapshot: MessageSnapshot): boolean {
+  return snapshot.kind === "file";
+}
+
 export function buildRawFeedback(snapshot: MessageSnapshot, annotations: readonly Annotation[]): string {
   let totalExcerptBytes = 0;
   const lineBytes = cachedLineBytes(snapshot);
+  const file = isFileSnapshot(snapshot);
   const lines = [
-    "# Message Feedback",
+    file ? "# File Feedback" : "# Message Feedback",
     "",
-    `Assistant entry: \`${snapshot.entryId}\``,
-    `Snapshot: \`${snapshot.snapshotId}\``,
+    ...(file
+      ? [`File: \`${snapshot.filePath ?? snapshot.entryId}\``, `Snapshot: \`${snapshot.snapshotId}\``]
+      : [`Assistant entry: \`${snapshot.entryId}\``, `Snapshot: \`${snapshot.snapshotId}\``]),
     "",
   ];
 
@@ -120,7 +129,7 @@ export function buildRawFeedback(snapshot: MessageSnapshot, annotations: readonl
       const excerpt = excerptWithReader(snapshot, annotation.anchor, lineBytes);
       totalExcerptBytes += Buffer.byteLength(excerpt);
       if (totalExcerptBytes > MAX_TOTAL_EXCERPT_BYTES) throw new FeedbackError("Combined selected excerpts are too large.");
-      lines.push("Selected assistant text:", "", fence(excerpt), "");
+      lines.push(file ? "Selected file text:" : "Selected assistant text:", "", fence(excerpt), "");
     }
     if (annotation.kind === "comment") {
       lines.push("User comment:", quote(annotation.comment), "");
@@ -142,10 +151,25 @@ export function plannotatorMessageWrapper(feedback: string): string {
   return getAnnotateMessageFeedbackPrompt("pi", loadConfig(), { feedback });
 }
 
+export function plannotatorFileWrapper(filePath: string, fileHeader = "File"): FeedbackWrapper {
+  return (feedback) => getAnnotateFileFeedbackPrompt("pi", loadConfig(), {
+    feedback,
+    filePath,
+    fileHeader,
+  });
+}
+
+export function defaultWrapperFor(snapshot: MessageSnapshot): FeedbackWrapper {
+  if (isFileSnapshot(snapshot) && snapshot.filePath) {
+    return plannotatorFileWrapper(snapshot.filePath);
+  }
+  return plannotatorMessageWrapper;
+}
+
 export function buildWrappedFeedback(
   snapshot: MessageSnapshot,
   annotations: readonly Annotation[],
-  wrapper: FeedbackWrapper = plannotatorMessageWrapper,
+  wrapper: FeedbackWrapper = defaultWrapperFor(snapshot),
 ): string {
   const prompt = wrapper(buildRawFeedback(snapshot, annotations));
   if (Buffer.byteLength(prompt) > MAX_PROMPT_BYTES) {
