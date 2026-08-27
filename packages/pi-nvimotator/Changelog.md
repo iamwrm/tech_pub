@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.4
+
+- Added `/nvim-annotate <path>`, a Neovim-side sibling of Plannotator's
+  `/plannotator-annotate` that snapshots a local file onto the existing
+  owner-only Unix bridge. Neovim still attaches with `:NvimotatorAttach`
+  and reuses comment, Quick Action prefix filter, Export, and Send.
+- File feedback is wrapped with Plannotator's `prompts.annotate.fileFeedback`
+  (`getAnnotateFileFeedbackPrompt`), including the file path, and is marked as
+  a file/document annotation rather than last-assistant-message feedback.
+  `/nvim-last` is unchanged and still uses `messageFeedback`.
+- Allowlist covers Plannotator annotate documents (markdown/text/config/HTML)
+  plus source files (`.ts`, `.lua`, and similar). Rejects `.env`/key material,
+  files over 2 MiB, URLs/Jina/live apps, and unreadable paths. A folder picks
+  one allowlisted file; there is no folder browser.
+
 ## 0.3.3
 
 - Owned floats open on the annotated/source line at its **current window row**

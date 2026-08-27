@@ -30,7 +30,14 @@ function M.open(bridge_id, snapshot)
   vim.bo[bufnr].buflisted = false
   vim.bo[bufnr].swapfile = false
   vim.bo[bufnr].undofile = false
-  vim.bo[bufnr].filetype = "markdown"
+  local filetype = "markdown"
+  if snapshot.kind == "file" and type(snapshot.filePath) == "string" and snapshot.filePath ~= "" then
+    local matched = vim.filetype.match({ filename = snapshot.filePath })
+    if type(matched) == "string" and matched ~= "" then
+      filetype = matched
+    end
+  end
+  vim.bo[bufnr].filetype = filetype
   vim.bo[bufnr].readonly = false
   vim.bo[bufnr].modifiable = true
   vim.api.nvim_buf_set_lines(bufnr, 0, -1, true, lines_for_text(snapshot.text))

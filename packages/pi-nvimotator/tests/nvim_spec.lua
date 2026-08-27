@@ -647,4 +647,29 @@ uv.fs_unlink(legacy_path)
 
 live_pipe:close()
 pcall(uv.fs_unlink, vim.fs.joinpath(registry_dir, "16.sock"))
+
+local file_snapshot = {
+  snapshotId = "snapshot-file-md",
+  kind = "file",
+  filePath = "/tmp/pi-nvimotator-notes.md",
+  text = "# Notes\nHello file\n",
+}
+local file_buf = scratch.open(17, file_snapshot)
+eq(table.concat(vim.api.nvim_buf_get_lines(file_buf, 0, -1, true), "\n"), file_snapshot.text, "file scratch bytes")
+eq(vim.bo[file_buf].buftype, "nofile", "file buftype")
+eq(vim.bo[file_buf].filetype, "markdown", "file markdown filetype")
+eq(vim.bo[file_buf].modifiable, false, "file scratch is not modifiable")
+eq(vim.bo[file_buf].readonly, true, "file scratch is readonly")
+
+local lua_snapshot = {
+  snapshotId = "snapshot-file-lua",
+  kind = "file",
+  filePath = "/tmp/pi-nvimotator-example.lua",
+  text = "local x = 1\n",
+}
+local lua_buf = scratch.open(18, lua_snapshot)
+local lua_ft = vim.bo[lua_buf].filetype
+ok(lua_ft == "lua" or lua_ft == "markdown", "lua file snapshot uses lua or markdown filetype")
+eq(vim.bo[lua_buf].modifiable, false, "lua file scratch is immutable")
+
 print("pi-nvimotator headless tests passed")

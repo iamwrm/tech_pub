@@ -10,13 +10,17 @@ type MessageEntry = {
   message?: { role?: unknown; content?: unknown };
 };
 
+export type SnapshotKind = "message" | "file";
+
 export interface MessageSnapshot {
+  readonly kind: SnapshotKind;
   readonly sessionId: string;
   readonly entryId: string;
   readonly snapshotId: string;
   readonly messageHash: string;
   readonly text: string;
   readonly lines: readonly string[];
+  readonly filePath?: string;
 }
 
 export class SnapshotError extends Error {
@@ -65,6 +69,7 @@ export function captureLatestAssistantSnapshot(
       .update(messageHash)
       .digest("hex");
     return Object.freeze({
+      kind: "message",
       sessionId,
       entryId: entry.id,
       snapshotId,

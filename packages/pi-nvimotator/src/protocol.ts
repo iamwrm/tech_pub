@@ -121,7 +121,7 @@ export interface ErrorResponse {
 
 export type SuccessResponse =
   | { protocolVersion: typeof PROTOCOL_VERSION; ok: true; requestId: string; type: "pong"; bridgeId: number; instanceId: string; sessionId: string; snapshotId: string }
-  | { protocolVersion: typeof PROTOCOL_VERSION; ok: true; requestId: string; type: "snapshot"; bridgeId: number; instanceId: string; sessionId: string; snapshotId: string; entryId: string; messageHash: string; text: string; quickActions: typeof QUICK_ACTIONS }
+  | { protocolVersion: typeof PROTOCOL_VERSION; ok: true; requestId: string; type: "snapshot"; bridgeId: number; instanceId: string; sessionId: string; snapshotId: string; entryId: string; messageHash: string; text: string; quickActions: typeof QUICK_ACTIONS; kind: "message" | "file"; filePath?: string }
   | { protocolVersion: typeof PROTOCOL_VERSION; ok: true; requestId: string; type: "rendered"; bridgeId: number; instanceId: string; sessionId: string; snapshotId: string; submissionId: string; annotationCount: number; prompt: string }
   | { protocolVersion: typeof PROTOCOL_VERSION; ok: true; requestId: string; type: "submitted"; bridgeId: number; instanceId: string; sessionId: string; snapshotId: string; submissionId: string; annotationCount: number; status: "scheduled" }
   | { protocolVersion: typeof PROTOCOL_VERSION; ok: true; requestId: string; type: "finished"; bridgeId: number; instanceId: string; sessionId: string; snapshotId: string; submissionId: string };

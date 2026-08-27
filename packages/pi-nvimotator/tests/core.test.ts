@@ -35,6 +35,8 @@ const annotations: Annotation[] = [
 
 test("assistant extraction uses the latest assistant text blocks and normalizes CRLF", () => {
   const value = snapshot();
+  assert.equal(value.kind, "message");
+  assert.equal(value.filePath, undefined);
   assert.equal(value.text, "alpha\nemoji 🙂 line\nomega");
   assert.deepEqual(value.lines, ["alpha", "emoji 🙂 line", "omega"]);
   assert.equal(value.entryId, "entry-1");
@@ -130,6 +132,48 @@ test("submission cache rejects pressure without forgetting prior identities", ()
   for (let index = 0; index < 128; index += 1) store.render(`cached-${index}`, annotations);
   assert.throws(() => store.render("overflow", annotations), /cache is full/);
   assert.equal(store.render("cached-0", annotations), "x");
+});
+
+test("default wrappers keep last-message and file annotation distinct", async () => {
+  const { mkdtemp, writeFile } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { captureFileSnapshot } = await import("../src/file-snapshot.ts");
+  const root = await mkdtemp(join(tmpdir(), "pi-nvimotator-wrap-"));
+  const previous = process.env.PLANNOTATOR_DATA_DIR;
+  process.env.PLANNOTATOR_DATA_DIR = root;
+  try {
+    const message = buildWrappedFeedback(snapshot(), annotations);
+    assert.match(message, /# Message Annotations/);
+    assert.match(message, /# Message Feedback/);
+    assert.match(message, /Assistant entry: `entry-1`/);
+    assert.match(message, /Selected assistant text:/);
+    assert.doesNotMatch(message, /# Markdown Annotations/);
+    assert.doesNotMatch(message, /# File Feedback/);
+
+    await writeFile(join(root, "config.json"), JSON.stringify({
+      prompts: {
+        annotate: {
+          fileFeedback: "CUSTOM-FILE {{fileHeader}} {{filePath}}\n{{feedback}}\nCUSTOM-FILE-END",
+        },
+      },
+    }));
+    const path = join(root, "notes.md");
+    await writeFile(path, "alpha\nemoji 🙂 line\nomega");
+    const fileSnapshot = await captureFileSnapshot(path, "session-1");
+    const filePrompt = buildWrappedFeedback(fileSnapshot, annotations);
+    assert.match(filePrompt, /CUSTOM-FILE File /);
+    assert.ok(filePrompt.includes(path), "wrapped file prompt includes the file path");
+    assert.match(filePrompt, /# File Feedback/);
+    assert.match(filePrompt, /Selected file text:/);
+    assert.match(filePrompt, /CUSTOM-FILE-END/);
+    assert.doesNotMatch(filePrompt, /# Message Annotations/);
+    assert.doesNotMatch(filePrompt, /Assistant entry:/);
+    assert.doesNotMatch(filePrompt, /Selected assistant text:/);
+  } finally {
+    if (previous === undefined) delete process.env.PLANNOTATOR_DATA_DIR;
+    else process.env.PLANNOTATOR_DATA_DIR = previous;
+  }
 });
 
 test("feedback fences nested backticks safely", () => {

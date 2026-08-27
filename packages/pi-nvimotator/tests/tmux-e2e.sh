@@ -60,7 +60,8 @@ cat >"$TEST_ROOT/plannotator/config.json" <<'JSON'
 {
   "prompts": {
     "annotate": {
-      "messageFeedback": "NVIMOTATOR-E2E-BEGIN\n{{feedback}}\nNVIMOTATOR-E2E-END"
+      "messageFeedback": "NVIMOTATOR-E2E-BEGIN\n{{feedback}}\nNVIMOTATOR-E2E-END",
+      "fileFeedback": "NVIMOTATOR-FILE-BEGIN\n{{fileHeader}}: {{filePath}}\n{{feedback}}\nNVIMOTATOR-FILE-END"
     }
   }
 }
@@ -238,6 +239,53 @@ wait_pane_text "$PI_PANE" 'NVIMOTATOR_E2E_ACK'
 for _ in $(seq 1 100); do [[ ! -e "$MANIFEST_FILE" ]] && break; sleep 0.05; done
 [[ ! -e "$MANIFEST_FILE" ]]
 [[ ! -e "$BRIDGE_SOCKET" ]]
+wait_nvim_phase detached
+
+# File annotation sibling of /nvim-last: snapshot local markdown, same attach/comment/send UX.
+ANNOTATE_FILE="$FIXTURES/annotate.md"
+tmux -S "$TMUX_SOCKET" send-keys -t "$PI_PANE" -l "/nvim-annotate $ANNOTATE_FILE"
+tmux -S "$TMUX_SOCKET" send-keys -t "$PI_PANE" Enter
+if ! FILE_MANIFEST=$(wait_registry_file 2); then
+  tmux -S "$TMUX_SOCKET" send-keys -t "$PI_PANE" Enter
+  FILE_MANIFEST=$(wait_registry_file 10)
+fi
+FILE_BRIDGE_ID=$(basename "$FILE_MANIFEST" .json)
+FILE_SOCKET=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).socketPath' "$FILE_MANIFEST")
+wait_pane_text "$PI_PANE" "nvim -c 'NvimotatorAttach $FILE_BRIDGE_ID'"
+wait_pane_text "$PI_PANE" "File: $ANNOTATE_FILE"
+
+nvim_expr "luaeval('nvimotator_e2e.attach_via_mapping($FILE_BRIDGE_ID)')" >/dev/null
+wait_nvim_phase ready
+nvim_expr "luaeval('nvimotator_e2e.capture()')" >/dev/null
+cmp "$ANNOTATE_FILE" "$ARTIFACTS/attached.bin"
+node - "$ARTIFACTS/attached.json" "$ANNOTATE_FILE" <<'NODE'
+const fs = require("fs"); const [path, filePath] = process.argv.slice(2); const value = JSON.parse(fs.readFileSync(path, "utf8"));
+if (value.kind !== "file") throw new Error("file snapshot kind is not file");
+if (value.filePath !== filePath) throw new Error("file snapshot path does not match");
+if (value.buftype !== "nofile" || value.modifiable !== false || value.readonly !== true) {
+  throw new Error("file scratch buffer options are not immutable");
+}
+NODE
+[[ $(nvim_expr "luaeval('nvimotator_e2e.annotate_line()')") == 1 ]]
+nvim_expr "luaeval('nvimotator_e2e.export()')" >/dev/null
+wait_file "$EXPORT_PATH"
+grep -Fq 'NVIMOTATOR-FILE-BEGIN' "$EXPORT_PATH"
+grep -Fq 'NVIMOTATOR-FILE-END' "$EXPORT_PATH"
+grep -Fq "$ANNOTATE_FILE" "$EXPORT_PATH"
+grep -Fq '> Tighten this line.' "$EXPORT_PATH"
+grep -Fq '# File Feedback' "$EXPORT_PATH"
+if grep -Fq 'NVIMOTATOR-E2E-BEGIN' "$EXPORT_PATH"; then echo "file export used last-message wrapper" >&2; exit 1; fi
+if grep -Fq 'Assistant entry:' "$EXPORT_PATH"; then echo "file export marked as last-message" >&2; exit 1; fi
+nvim_expr "luaeval('nvimotator_e2e.send()')" >/dev/null
+wait_file "$ARTIFACTS/request-3.bin"
+cmp "$EXPORT_PATH" "$ARTIFACTS/request-3.bin"
+wait_file "$ARTIFACTS/response-3.ready"
+wait_pane_text "$PI_PANE" 'NVIMOTATOR_E2E_ACK'
+[[ $(cat "$ARTIFACTS/call-count") == 3 ]]
+for _ in $(seq 1 100); do [[ ! -e "$FILE_MANIFEST" ]] && break; sleep 0.05; done
+[[ ! -e "$FILE_MANIFEST" ]]
+[[ ! -e "$FILE_SOCKET" ]]
+wait_nvim_phase detached
 
 # A hard-killed Pi cannot perform lifecycle cleanup; Neovim must remove only the unchanged stale locator.
 tmux -S "$TMUX_SOCKET" send-keys -t "$PI_PANE" -l '/nvim-last'

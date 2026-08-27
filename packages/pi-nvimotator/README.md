@@ -1,9 +1,10 @@
 # pi-nvimotator
 
 Private, path-installed Pi extension plus dependency-free Neovim plugin for
-annotating the latest assistant response. Run `/nvim-last`, attach to its small
-numeric ID from any same-host shell, then send structured line/selection
-feedback or copy the exact same Plannotator-wrapped prompt.
+annotating the latest assistant response or a local file. Run `/nvim-last` or
+`/nvim-annotate <path>`, attach to the small numeric ID from any same-host
+shell, then send structured line/selection feedback or copy the exact same
+Plannotator-wrapped prompt.
 
 ## Requirements
 
@@ -122,6 +123,8 @@ The plugin owns and safely refreshes its commands and `<Plug>` mappings, so
 
 ## Workflow
 
+### Latest assistant message
+
 In Pi:
 
 ```text
@@ -135,9 +138,27 @@ Nvimotator ready (16)
 nvim -c 'NvimotatorAttach 16'
 ```
 
-Run the command from any directory on the same host. The Neovim installation
-above makes `:NvimotatorAttach` available, and the command opens the captured
-assistant message as an immutable Markdown scratch buffer.
+### Local file
+
+In Pi, pass a local markdown, text, config, HTML, or source file (or a folder
+to pick one such file):
+
+```text
+/nvim-annotate README.md
+```
+
+Pi reports the same style of locator. File annotation stays in Neovim; it does
+not open Plannotator's browser, fetch URLs, or launch a live app.
+
+```text
+Nvimotator ready (16)
+File: /absolute/path/to/README.md
+nvim -c 'NvimotatorAttach 16'
+```
+
+Run the attach command from any directory on the same host. The Neovim
+installation above makes `:NvimotatorAttach` available, and the command opens
+the captured assistant message or file as an immutable scratch buffer.
 
 | Neovim command or mapping | Action |
 | --- | --- |
@@ -212,11 +233,22 @@ mode is deliberately rejected.
 - `/nvim-last` waits for Pi to settle and snapshots the latest non-empty
   assistant message on the active branch. Running it again refreshes the
   snapshot while preserving the live bridge locator.
+- `/nvim-annotate <path>` snapshots a local file onto the same bridge. Allowed
+  types match Plannotator annotate documents (`.md`, `.mdx`, `.txt`, YAML/JSON
+  /TOML/HTML and similar) and, broader than Plannotator annotate, source files
+  such as `.ts` and `.lua`. Files must be 2 MiB or smaller. Bare `.env` files
+  and key material are rejected. A directory lists immediate annotatable files
+  and picks one; there is no folder browser. URLs, Jina, live `--app`/`--static`
+  HTML, plan-mode, `/plannotator-review` diffs, and Approve/gate are out of
+  scope.
 - The Pi process must remain open. Reload, new/resumed/forked sessions, or exit
   close the bridge.
-- Feedback uses Plannotator's configured `prompts.annotate.messageFeedback`
-  template. Export freezes the rendered bytes; a later Send of the unchanged
-  annotations schedules those exact bytes.
+- Last-message feedback uses Plannotator's configured
+  `prompts.annotate.messageFeedback` template. File feedback uses
+  `prompts.annotate.fileFeedback`, includes the file path, and is marked as a
+  file/document annotation rather than last-assistant-message feedback. Export
+  freezes the rendered bytes; a later Send of the unchanged annotations
+  schedules those exact bytes.
 - A successful bridge acknowledgement means Pi accepted the synchronous
   scheduling call. Pi's public API does not prove durable transcript
   persistence, and deduplication lasts only for the live bridge.

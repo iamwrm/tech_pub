@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { activateNvimotator } from "../index.ts";
@@ -27,7 +30,7 @@ function manifest(snapshot: any): BridgeManifest {
 }
 
 test("activation is lazy, waits for idle, refreshes one bridge, and schedules follow-up", async () => {
-  let command: any;
+  const commands: Record<string, any> = {};
   let shutdown: (() => Promise<void>) | undefined;
   let createCount = 0;
   let waitCount = 0;
@@ -39,7 +42,7 @@ test("activation is lazy, waits for idle, refreshes one bridge, and schedules fo
   let active = false;
 
   const pi = {
-    registerCommand(_name: string, definition: any) { command = definition; },
+    registerCommand(name: string, definition: any) { commands[name] = definition; },
     on(event: string, handler: any) { if (event === "session_shutdown") shutdown = handler; },
     sendUserMessage(prompt: string, options: unknown) { sent.push({ prompt, options }); },
   } as unknown as ExtensionAPI;
@@ -58,9 +61,12 @@ test("activation is lazy, waits for idle, refreshes one bridge, and schedules fo
   });
 
   assert.equal(createCount, 0);
-  assert.ok(command);
+  assert.ok(commands["nvim-last"]);
+  assert.ok(commands["nvim-annotate"]);
+  const last = commands["nvim-last"];
   const ctx = {
     mode: "tui",
+    cwd: process.cwd(),
     waitForIdle: async () => { waitCount += 1; },
     sessionManager: {
       getBranch: () => activeBranch,
@@ -72,18 +78,19 @@ test("activation is lazy, waits for idle, refreshes one bridge, and schedules fo
     },
   };
 
-  await Promise.all([command.handler("", ctx), command.handler("", ctx)]);
+  await Promise.all([last.handler("", ctx), last.handler("", ctx)]);
   assert.equal(waitCount, 2);
   assert.equal(createCount, 1);
   const readyNotice = notifications.at(-1)!;
   assert.match(readyNotice, /Nvimotator ready \(16\)/);
   assert.match(readyNotice, /nvim -c 'NvimotatorAttach 16'/);
   assert.doesNotMatch(readyNotice, /PI_NVIMOTATOR_PACKAGE|runtimepath/);
+  assert.equal(bridgeOptions.snapshot.kind, "message");
   bridgeOptions.onSubmit("feedback bytes");
   assert.deepEqual(sent, [{ prompt: "feedback bytes", options: { deliverAs: "followUp" } }]);
 
   activeBranch = branch("second", "assistant-2");
-  await command.handler("", ctx);
+  await last.handler("", ctx);
   assert.equal(createCount, 1);
   assert.equal(waitCount, 3);
 
@@ -92,58 +99,61 @@ test("activation is lazy, waits for idle, refreshes one bridge, and schedules fo
 });
 
 test("non-TUI mode and missing assistant fail without allocating resources", async () => {
-  let command: any;
+  const commands: Record<string, any> = {};
   let created = 0;
   const notices: string[] = [];
   const pi = {
-    registerCommand(_name: string, definition: any) { command = definition; },
+    registerCommand(name: string, definition: any) { commands[name] = definition; },
     on() {},
     sendUserMessage() {},
   } as unknown as ExtensionAPI;
   activateNvimotator(pi, { createBridge() { created += 1; throw new Error("unexpected"); } });
+  const last = commands["nvim-last"];
   const base = {
+    cwd: process.cwd(),
     waitForIdle: async () => undefined,
     sessionManager: { getBranch: () => [], getSessionId: () => "session" },
     ui: { notify: (message: string) => notices.push(message), setStatus: () => undefined },
   };
-  await command.handler("", { ...base, mode: "json" });
+  await last.handler("", { ...base, mode: "json" });
   assert.match(notices.at(-1)!, /interactive TUI/);
-  await command.handler("", { ...base, mode: "tui" });
+  await last.handler("", { ...base, mode: "tui" });
   assert.match(notices.at(-1)!, /No non-empty assistant message/);
   assert.equal(created, 0);
 });
 
 test("shutdown owns commands waiting for idle and bridges still starting", async () => {
-  let command: any;
+  const commands: Record<string, any> = {};
   let shutdown: (() => Promise<void>) | undefined;
   let resolveIdle!: () => void;
   const idle = new Promise<void>((resolve) => { resolveIdle = resolve; });
   let created = 0;
   let stopped = 0;
   const pi = {
-    registerCommand(_name: string, definition: any) { command = definition; },
+    registerCommand(name: string, definition: any) { commands[name] = definition; },
     on(event: string, handler: any) { if (event === "session_shutdown") shutdown = handler; },
     sendUserMessage() {},
   } as unknown as ExtensionAPI;
   activateNvimotator(pi, { createBridge() { created += 1; throw new Error("unexpected"); } });
   const context = {
     mode: "tui",
+    cwd: process.cwd(),
     waitForIdle: () => idle,
     sessionManager: { getBranch: () => branch("waiting"), getSessionId: () => "session-wait" },
     ui: { notify() {}, setStatus() {} },
   };
-  const waitingCommand = command.handler("", context);
+  const waitingCommand = commands["nvim-last"].handler("", context);
   const waitingShutdown = shutdown!();
   resolveIdle();
   await Promise.all([waitingCommand, waitingShutdown]);
   assert.equal(created, 0);
 
-  let command2: any;
+  const commands2: Record<string, any> = {};
   let shutdown2: (() => Promise<void>) | undefined;
   let resolveStart!: (value: BridgeManifest) => void;
   const starting = new Promise<BridgeManifest>((resolve) => { resolveStart = resolve; });
   const pi2 = {
-    registerCommand(_name: string, definition: any) { command2 = definition; },
+    registerCommand(name: string, definition: any) { commands2[name] = definition; },
     on(event: string, handler: any) { if (event === "session_shutdown") shutdown2 = handler; },
     sendUserMessage() {},
   } as unknown as ExtensionAPI;
@@ -163,11 +173,72 @@ test("shutdown owns commands waiting for idle and bridges still starting", async
     waitForIdle: async () => undefined,
     sessionManager: { getBranch: () => branch("starting"), getSessionId: () => "session-start" },
   };
-  const startingCommand = command2.handler("", context2);
+  const startingCommand = commands2["nvim-last"].handler("", context2);
   while (created < 1) await new Promise((resolve) => setImmediate(resolve));
   const startingShutdown = shutdown2!();
   const fakeSnapshot = captureLatestAssistantSnapshot(branch("starting"), "session-start");
   resolveStart(manifest(fakeSnapshot));
   await Promise.all([startingCommand, startingShutdown]);
   assert.equal(stopped, 1);
+});
+
+test("nvim-annotate snapshots a local file and last-message still refreshes the same bridge", async () => {
+  const commands: Record<string, any> = {};
+  let createCount = 0;
+  let latestSnapshot: any;
+  let active = false;
+  const notices: string[] = [];
+  const pi = {
+    registerCommand(name: string, definition: any) { commands[name] = definition; },
+    on() {},
+    sendUserMessage() {},
+  } as unknown as ExtensionAPI;
+  activateNvimotator(pi, {
+    createBridge(options) {
+      createCount += 1;
+      latestSnapshot = options.snapshot;
+      return {
+        isActive: () => active,
+        start: async () => { active = true; return manifest(options.snapshot); },
+        updateSnapshot: async (snapshot: any) => {
+          latestSnapshot = snapshot;
+          return manifest(snapshot);
+        },
+        stop: async () => { active = false; },
+      } as any;
+    },
+  });
+
+  const root = await mkdtemp(join(tmpdir(), "pi-nvimotator-annotate-"));
+  const filePath = join(root, "notes.md");
+  await writeFile(filePath, "# Notes\nHello\n");
+  const ctx = {
+    mode: "tui",
+    cwd: root,
+    waitForIdle: async () => undefined,
+    sessionManager: { getBranch: () => branch("assistant text"), getSessionId: () => "session-1" },
+    ui: { notify: (message: string) => notices.push(message), setStatus: () => undefined, select: async () => undefined },
+  };
+
+  await commands["nvim-annotate"].handler("", ctx);
+  assert.match(notices.at(-1)!, /Usage: \/nvim-annotate <path>/);
+  assert.equal(createCount, 0);
+
+  await writeFile(join(root, ".env"), "SECRET=1\n");
+  await commands["nvim-annotate"].handler(join(root, ".env"), ctx);
+  assert.match(notices.at(-1)!, /secrets/);
+  assert.equal(createCount, 0);
+
+  await commands["nvim-annotate"].handler(filePath, ctx);
+  assert.equal(createCount, 1);
+  assert.equal(latestSnapshot.kind, "file");
+  assert.equal(latestSnapshot.filePath, filePath);
+  assert.match(notices.at(-1)!, /Nvimotator ready \(16\)/);
+  assert.match(notices.at(-1)!, /File: /);
+  assert.match(notices.at(-1)!, /nvim -c 'NvimotatorAttach 16'/);
+
+  await commands["nvim-last"].handler("", ctx);
+  assert.equal(createCount, 1);
+  assert.equal(latestSnapshot.kind, "message");
+  assert.match(latestSnapshot.text, /assistant text/);
 });

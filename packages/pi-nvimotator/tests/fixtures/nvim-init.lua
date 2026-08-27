@@ -58,6 +58,8 @@ function _G.nvimotator_e2e.capture()
     cwd = vim.fn.getcwd(),
     bridgeId = state.manifest.bridgeId,
     snapshotId = state.snapshot.snapshotId,
+    kind = state.snapshot.kind,
+    filePath = state.snapshot.filePath,
     buftype = vim.bo[state.bufnr].buftype,
     filetype = vim.bo[state.bufnr].filetype,
     modifiable = vim.bo[state.bufnr].modifiable,
