@@ -55,25 +55,36 @@ local function leave_visual()
   end
 end
 
+local function window_row(source_window, target_line)
+  vim.cmd("redraw")
+  local screen = vim.fn.screenpos(source_window, target_line, 1)
+  if type(screen) ~= "table" or screen.row == 0 then return nil end
+  local winpos = vim.api.nvim_win_get_position(source_window)
+  return screen.row - winpos[1]
+end
+
 local function locate_line(source_window, target_line)
   vim.cmd("redraw")
   local screen = vim.fn.screenpos(source_window, target_line, 1)
   if type(screen) == "table" and screen.row ~= 0 then return screen end
-  pcall(vim.api.nvim_win_call, source_window, function()
-    vim.fn.winrestview({
-      lnum = target_line,
-      col = 0,
-      coladd = 0,
-      curswant = 0,
-      leftcol = 0,
-      topline = target_line,
-      topfill = 0,
-    })
-  end)
-  vim.cmd("redraw")
-  screen = vim.fn.screenpos(source_window, target_line, 1)
-  if type(screen) == "table" and screen.row ~= 0 then return screen end
   return nil
+end
+
+-- Keep the target on its current window row, scrolling only far enough that
+-- occupied_rows of displacement/float can sit below it. Never `zt`.
+local function keep_target_window_row(source_window, target_line, desired_winrow, window_height, occupied_rows)
+  vim.wo.scrolloff = 0
+  vim.api.nvim_win_set_cursor(source_window, { target_line, 0 })
+  vim.cmd("redraw")
+  local max_winrow = math.max(1, window_height - occupied_rows)
+  local current = vim.fn.winline()
+  local goal = math.max(1, math.min(desired_winrow or current, max_winrow))
+  local delta = current - goal
+  if delta > 0 then
+    pcall(vim.cmd.normal, { bang = true, args = { string.rep("\5", delta) }, mods = { silent = true } })
+  elseif delta < 0 then
+    pcall(vim.cmd.normal, { bang = true, args = { string.rep("\25", -delta) }, mods = { silent = true } })
+  end
 end
 
 local function open_split(buffer, options, lease)
@@ -116,6 +127,8 @@ function M.open(buffer, options)
   local height = math.max(1, math.min(options.height or 8, window_height - 3))
   local width = math.max(1, math.min(options.width or 72, window_width - 2))
   local occupied_rows = height + 2
+  pcall(vim.api.nvim_win_call, source_window, leave_visual)
+  local desired_winrow = window_row(source_window, target_line)
   lease.extmark = vim.api.nvim_buf_set_extmark(source_buffer, namespace, target_line - 1, 0, {
     virt_lines = blank_virtual_lines(occupied_rows),
     virt_lines_above = false,
@@ -123,10 +136,7 @@ function M.open(buffer, options)
 
   lease.previous_scrolloff = vim.wo[source_window].scrolloff
   local positioned = pcall(vim.api.nvim_win_call, source_window, function()
-    leave_visual()
-    vim.wo.scrolloff = 0
-    vim.api.nvim_win_set_cursor(source_window, { target_line, 0 })
-    vim.cmd("normal! zt")
+    keep_target_window_row(source_window, target_line, desired_winrow, window_height, occupied_rows)
   end)
   if not positioned then
     restore_source(lease)

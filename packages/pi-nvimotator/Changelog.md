@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.3
+
+- Owned floats open on the annotated/source line at its **current window row**
+  instead of `zt`-pinning that line to the top of the window. Virtual lines
+  still displace following source text so the float never covers it. If the
+  line is too low for the bordered modal, the view scrolls only far enough
+  for the float to fit; a line that still cannot be located falls back to the
+  existing tiny-window split.
+
 ## 0.3.2
 
 - Quick Action no longer treats picker cancel/`WinClosed` as a selected action.

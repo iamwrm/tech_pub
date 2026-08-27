@@ -339,6 +339,56 @@ eq(vim.wo[probe_win].scrolloff, 10, "layout restores scrolloff after last-line p
 if vim.api.nvim_win_is_valid(probe_win) then vim.api.nvim_win_close(probe_win, true) end
 vim.api.nvim_set_current_win(source_window)
 
+vim.cmd("belowright 20new")
+local mid_win = vim.api.nvim_get_current_win()
+local mid_buf = vim.api.nvim_get_current_buf()
+local mid_lines = {}
+for i = 1, 80 do mid_lines[i] = "mid-window line " .. i end
+vim.bo[mid_buf].buftype = "nofile"
+vim.api.nvim_buf_set_lines(mid_buf, 0, -1, true, mid_lines)
+pcall(vim.api.nvim_win_set_height, mid_win, 20)
+vim.wo[mid_win].scrolloff = 5
+vim.api.nvim_win_set_cursor(mid_win, { 40, 0 })
+vim.cmd("normal! zz")
+vim.cmd("redraw")
+local before_mid = vim.api.nvim_win_call(mid_win, function()
+  return { winline = vim.fn.winline(), topline = vim.fn.winsaveview().topline }
+end)
+ok(before_mid.winline > 5, "precondition: cursor is not at the top of the window")
+ok(before_mid.topline ~= 40, "precondition: target line is not the window topline")
+local mid_comment, mid_error = modal.comment({
+  title = "Mid-window comment",
+  source_window = mid_win,
+  target_line = 40,
+}, function() end)
+ok(mid_comment, mid_error)
+eq(modal._active().lease.kind, "float", "mid-window comment uses displaced float")
+local after_mid = vim.api.nvim_win_call(mid_win, function()
+  return { winline = vim.fn.winline(), topline = vim.fn.winsaveview().topline }
+end)
+ok(after_mid.winline > 1, "layout does not pin the target line to window row 1")
+ok(after_mid.topline ~= 40, "layout does not zt the target line to the top of the window")
+ok(math.abs(after_mid.winline - before_mid.winline) <= 4,
+  "layout keeps the target near its original window row")
+local mid_screen = vim.fn.screenpos(mid_win, 40, 1)
+local mid_config = vim.api.nvim_win_get_config(mid_comment)
+eq(mid_config.row, mid_screen.row, "float is placed at the target line's current screen row")
+local mid_outer_top = mid_config.row + 1
+local mid_outer_bottom = mid_outer_top + mid_config.height + 1
+for line = 1, vim.api.nvim_buf_line_count(mid_buf) do
+  local position = vim.fn.screenpos(mid_win, line, 1)
+  if position.row > 0 then
+    ok(position.row < mid_outer_top or position.row > mid_outer_bottom,
+      "mid-window real source line is not beneath the comment float")
+  end
+end
+eq(#vim.api.nvim_buf_get_extmarks(mid_buf, layout.namespace(), 0, -1, {}), 1,
+  "mid-window comment has one displacement lease")
+modal.close()
+ok(vim.wait(1000, function() return not modal.is_open() end), "mid-window comment closes")
+if vim.api.nvim_win_is_valid(mid_win) then vim.api.nvim_win_close(mid_win, true) end
+vim.api.nvim_set_current_win(source_window)
+
 plugin_state.phase = saved_plugin_state.phase
 plugin_state.store = saved_plugin_state.store
 plugin_state.bufnr = saved_plugin_state.bufnr
