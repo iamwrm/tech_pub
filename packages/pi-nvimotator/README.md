@@ -151,10 +151,11 @@ assistant message as an immutable Markdown scratch buffer.
 | `:NvimotatorSend` | Schedule feedback in the originating Pi session and close the bridge. |
 | `:NvimotatorClear` | Confirm and clear this snapshot's pending annotations. |
 
-Comments open in a rounded multiline Markdown editor below the selected line.
-Temporary blank virtual lines displace the following source rows, so the float
-covers no source text while snapshot bytes and annotation line numbers remain
-unchanged. The editor is a normal `buftype=nofile` scratch buffer, so insert,
+Comments open in a rounded multiline Markdown editor below the selected line,
+at that line's current position in the window rather than scrolling it to the
+top. Temporary blank virtual lines displace the following source rows, so the
+float covers no source text while snapshot bytes and annotation line numbers
+remain unchanged. The editor is a normal `buftype=nofile` scratch buffer, so insert,
 normal, visual, and default Vim keys work, including terminal Ctrl-V / bracketed
 paste. Press `<C-s>` in normal or insert mode to save; press `<C-c>` to cancel.
 `<Esc>` and `<C-[>` do not close the popup: insert Esc leaves insert, and
