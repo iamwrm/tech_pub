@@ -672,4 +672,88 @@ local lua_ft = vim.bo[lua_buf].filetype
 ok(lua_ft == "lua" or lua_ft == "markdown", "lua file snapshot uses lua or markdown filetype")
 eq(vim.bo[lua_buf].modifiable, false, "lua file scratch is immutable")
 
+local store_dir = assert(vim.env.NVIMOTATOR_STORE)
+vim.fn.mkdir(store_dir, "p", 448)
+uv.fs_chmod(store_dir, 448)
+local slot_dir = vim.fs.joinpath(store_dir, "42")
+vim.fn.mkdir(slot_dir, "p", 448)
+uv.fs_chmod(slot_dir, 448)
+local file_store_snapshot = {
+  kind = "message",
+  sessionId = "file-session",
+  entryId = "msg_file",
+  snapshotId = "snapshot-file-store",
+  messageHash = string.rep("b", 64),
+  text = "File store snapshot\nsecond line",
+  lines = { "File store snapshot", "second line" },
+  quickActions = plannotator_quick_actions,
+}
+local slot_meta = {
+  id = 42,
+  status = "exported",
+  kind = "message",
+  sessionId = "file-session",
+  entryId = "msg_file",
+  snapshotId = "snapshot-file-store",
+  messageHash = string.rep("b", 64),
+  createdAt = "2026-08-01T00:00:00.000Z",
+}
+local function write_mode(path, text)
+  local fd = assert(uv.fs_open(path, "w", 384))
+  assert(uv.fs_write(fd, text, 0))
+  uv.fs_close(fd)
+  uv.fs_chmod(path, 384)
+end
+write_mode(vim.fs.joinpath(slot_dir, "snapshot.md"), file_store_snapshot.text .. "\n")
+write_mode(vim.fs.joinpath(slot_dir, "snapshot.json"), vim.json.encode(file_store_snapshot))
+write_mode(vim.fs.joinpath(slot_dir, "meta.json"), vim.json.encode(slot_meta))
+
+local nvimotator = require("pi_nvimotator")
+nvimotator.attach("42")
+local file_state = nvimotator._state()
+eq(file_state.backend, "file", "file-store backend")
+eq(file_state.file_slot.id, 42, "file-store id")
+eq(file_state.phase, "ready", "file-store attach ready")
+local attached_lock = uv.fs_lstat(vim.fs.joinpath(slot_dir, "attach.lock"))
+ok(attached_lock, "attach.lock created")
+file_state.store:add_comment(nil, "Looks right from Neovim")
+nvimotator.send()
+local annotation = assert(io.open(vim.fs.joinpath(slot_dir, "annotation.md"), "r"))
+local annotation_body = annotation:read("*a")
+annotation:close()
+ok(annotation_body:find("last assistant message", 1, true), "file-store wrap names last assistant message")
+ok(annotation_body:find("Looks right from Neovim", 1, true), "file-store wrap includes the comment")
+ok(annotation_body:find("# Message Feedback", 1, true), "file-store wrap uses message feedback")
+local last_body_file = assert(io.open(vim.fs.joinpath(store_dir, "last", "annotation.md"), "r"))
+local last_body = last_body_file:read("*a")
+last_body_file:close()
+eq(last_body, annotation_body, "last pointer copies the sent annotation")
+eq(nvimotator._state().backend, nil, "file-store send detaches")
+eq(uv.fs_lstat(vim.fs.joinpath(slot_dir, "attach.lock")), nil, "attach.lock removed after send")
+
+nvimotator.attach(vim.fs.joinpath(slot_dir, "snapshot.md"))
+eq(nvimotator._state().phase, "detached", "sent slot cannot re-attach by path until a new export")
+
+-- Lockstep wrap golden (same files as tests/wrap-golden.test.ts). Lua wrap only; do not spawn Node.
+local wrap_feedback = require("pi_nvimotator.feedback")
+local wrap_fixture = vim.fs.joinpath(package_root, "tests", "fixtures", "wrap-golden")
+local function read_all(path)
+  local handle = assert(io.open(path, "r"))
+  local body = handle:read("*a")
+  handle:close()
+  return body
+end
+local function posix_text(path)
+  local body = read_all(path)
+  ok(body:sub(-1) == "\n", path .. " must be POSIX text (trailing newline)")
+  return body:sub(1, -2)
+end
+for _, kind in ipairs({ "message", "file" }) do
+  local snapshot = vim.json.decode(read_all(vim.fs.joinpath(wrap_fixture, kind .. "-snapshot.json")))
+  local annotations = vim.json.decode(read_all(vim.fs.joinpath(wrap_fixture, kind .. "-annotations.json")))
+  local actual, wrap_error = wrap_feedback.build_wrapped(snapshot, annotations)
+  ok(actual, "lua wrap " .. kind .. ": " .. tostring(wrap_error))
+  eq(actual, posix_text(vim.fs.joinpath(wrap_fixture, kind .. ".golden.md")), "lua wrap matches " .. kind .. " golden")
+end
+
 print("pi-nvimotator headless tests passed")

@@ -1,0 +1,26 @@
+{
+  "kind": "message",
+  "sessionId": "wrap-golden-session",
+  "entryId": "wrap-entry",
+  "snapshotId": "wrap-message-snapshot",
+  "messageHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "text": "First assistant line\nSecond assistant line",
+  "lines": [
+    "First assistant line",
+    "Second assistant line"
+  ],
+  "quickActions": [
+    { "id": "deletion", "label": "Deletion", "description": "I don't want this in the message." },
+    { "id": "thumbs-up", "label": "👍 Looks good", "description": "" },
+    { "id": "clarify-this", "label": "❓ Clarify this", "description": "" },
+    { "id": "missing-overview", "label": "🗺️ Missing overview", "description": "Provide a narrative overview of what is being built, why it is being built, and how it will be built. Add this before the implementation details." },
+    { "id": "verify-this", "label": "🔍 Verify this", "description": "This seems like an assumption. Verify by reading the actual code before proceeding." },
+    { "id": "give-me-an-example", "label": "🔬 Give me an example", "description": "This is too abstract. Show a before/after, a sample input/output, or a specific scenario so I can see how this actually works." },
+    { "id": "match-existing-patterns", "label": "🧬 Match existing patterns", "description": "Search the codebase for existing patterns, components, or utilities that already solve this. Reuse what exists rather than introducing a new approach." },
+    { "id": "consider-alternatives", "label": "🔄 Consider alternatives", "description": "Propose 2-3 alternative approaches with trade-offs based on the actual codebase. Also check the Plannotator plans directory (PLANNOTATOR_DATA_DIR or ~/.plannotator/plans/) for prior plan versions that may have already explored or rejected similar approaches." },
+    { "id": "ensure-no-regression", "label": "📉 Ensure no regression", "description": "Verify that this change will not break existing behavior. Identify what could regress and how to protect against it." },
+    { "id": "out-of-scope", "label": "🚫 Out of scope", "description": "This is not part of the current task. Remove it and stay focused on what was actually requested." },
+    { "id": "needs-tests", "label": "🧪 Needs tests", "description": "" },
+    { "id": "nice-approach", "label": "👍 Nice approach", "description": "" }
+  ]
+}

@@ -1,0 +1,9 @@
+{"type":"user","uuid":"u1","parentUuid":null,"timestamp":"2026-08-01T00:00:00.000Z","sessionId":"sess-live","cwd":"/work/demo","message":{"role":"user","content":"Write a greeting"}}
+{"type":"assistant","uuid":"a1","parentUuid":"u1","timestamp":"2026-08-01T00:00:01.000Z","sessionId":"sess-live","message":{"id":"msg_old","role":"assistant","content":[{"type":"thinking","thinking":"hidden chain"},{"type":"text","text":"First reply"}]}}
+{"type":"user","uuid":"u2","parentUuid":"a1","timestamp":"2026-08-01T00:00:02.000Z","sessionId":"sess-live","message":{"role":"user","content":"Revise it"}}
+{"type":"assistant","uuid":"a2","parentUuid":"u2","timestamp":"2026-08-01T00:00:03.000Z","sessionId":"sess-live","message":{"id":"msg_new","role":"assistant","content":[{"type":"text","text":"Latest rendered\nsecond line"}]}}
+{"type":"assistant","uuid":"a3","parentUuid":"a2","timestamp":"2026-08-01T00:00:04.000Z","sessionId":"sess-live","message":{"id":"msg_new","role":"assistant","content":[{"type":"text","text":"chunk two"}]}}
+{"type":"user","uuid":"orphan-user","parentUuid":"a3","timestamp":"2026-08-01T00:00:05.000Z","sessionId":"sess-live","message":{"role":"user","content":"rewind away from this"}}
+{"type":"assistant","uuid":"orphan-asst","parentUuid":"orphan-user","timestamp":"2026-08-01T00:00:06.000Z","sessionId":"sess-live","message":{"id":"msg_orphan","role":"assistant","content":[{"type":"text","text":"Orphaned after rewind"}]}}
+{"type":"user","uuid":"u3","parentUuid":"a3","timestamp":"2026-08-01T00:00:07.000Z","sessionId":"sess-live","message":{"role":"user","content":"<local-command-stdout>ignored"}}
+{"type":"assistant","uuid":"hidden","parentUuid":"u3","timestamp":"2026-08-01T00:00:08.000Z","sessionId":"sess-live","visibility":"hidden","message":{"id":"msg_hidden","role":"assistant","content":[{"type":"text","text":"Should not be visible"}]}}

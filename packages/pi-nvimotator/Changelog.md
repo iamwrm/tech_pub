@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased
+
+- Removed unused live-bridge `blocking` snapshot flag and `cancel` request.
+  `:NvimotatorCancel` on Pi still detaches locally; the bridge keeps running.
+  `ping` is unchanged.
+- Removed file-store CLI `complete`. Neovim Lua writes `annotation.md`.
+
+## 0.4.0
+
+- Added a generic file store (`~/.nvimotator/<id>/`, override `NVIMOTATOR_STORE`)
+  and file-store CLI (`export` / `annotate` / `last` / `import`) for Claude Code
+  and Codex. IDs recycle in 1–99. Neovim can attach by file-store id or
+  `snapshot.md` path; Send writes `annotation.md` and a stable
+  `last/annotation.md`. Pi `/nvim-last` still uses the live Unix-socket bridge.
+- `:NvimotatorAttach` tries the live Pi registry first, then the file store.
+- Nested `claude/` is the Claude Code marketplace plugin (file-store CLI);
+  nested `codex/` is Codex skills + `!` only. `pi.extensions` is only
+  `index.ts`; `pi install ./packages/pi-nvimotator` does not load those hosts.
+- Package README leads with a Pi / Claude Code / Codex host map. `files`
+  includes nested `claude/` and `codex/` so a path/pack of this package
+  includes the hosts.
+
+## 0.3.5
+
+- Dropped the `@plannotator/pi-extension` runtime dependency. Export and Send
+  wrap last-message and file feedback with a small local instruction block
+  (Neovim annotation on the last assistant message or a local file; incorporate
+  comments and quick actions). Quick-action labels remain Plannotator-inspired.
+  `pi install ./packages/pi-nvimotator` no longer requires `npm ci` first.
+- `:NvimotatorCancel` detaches locally on Pi; the host bridge keeps running.
+  Send's acknowledgement no longer says "in Pi".
+- Registry directories created in this process are chmod'd to `0700` after
+  `mkdir`, so a typical umask of `0022` no longer leaves a new Unix-socket
+  registry world-readable and then fail-closed. An existing too-open override
+  is still rejected without chmod.
+
 ## 0.3.4
 
 - Added `/nvim-annotate <path>`, a Neovim-side sibling of Plannotator's
@@ -27,7 +63,7 @@
 ## 0.3.2
 
 - Quick Action no longer treats picker cancel/`WinClosed` as a selected action.
-  The in-place owned picker forwarded `nil` into `add_action`, which
+  The in-place owned picker (`99dd901`) forwarded `nil` into `add_action`, which
   warned `Nvimotator quick action is invalid.` Restored the old `vim.ui.select`
   nil-guard, pass the source window and range end into the layout lease, leave
   visual before positioning, and fall back to the existing split when the

@@ -1,6 +1,8 @@
 local annotations = require("pi_nvimotator.annotations")
 local client = require("pi_nvimotator.client")
 local draft = require("pi_nvimotator.draft")
+local feedback = require("pi_nvimotator.feedback")
+local file_store = require("pi_nvimotator.file_store")
 local modal = require("pi_nvimotator.modal")
 local protocol = require("pi_nvimotator.protocol")
 local registry = require("pi_nvimotator.registry")
@@ -17,12 +19,16 @@ end
 local function identity()
   if not state.snapshot then return nil end
   return {
-    instanceId = state.snapshot.instanceId,
+    instanceId = state.snapshot.instanceId or (state.file_slot and ("file-store-" .. tostring(state.file_slot.id)) or nil),
     sessionId = state.snapshot.sessionId,
     snapshotId = state.snapshot.snapshotId,
     entryId = state.snapshot.entryId,
     messageHash = state.snapshot.messageHash,
   }
+end
+
+local function is_file_backend()
+  return state.backend == "file" and state.file_slot ~= nil
 end
 
 local function save_draft()
@@ -38,7 +44,7 @@ end
 
 local function ensure_ready(require_buffer)
   if state.phase ~= "ready" or not state.store then
-    notify("Attach to a live bridge with :NvimotatorAttach <id> first.", vim.log.levels.WARN)
+    notify("Attach to a live bridge or file-store snapshot with :NvimotatorAttach <id> first.", vim.log.levels.WARN)
     return false
   end
   if require_buffer and vim.api.nvim_get_current_buf() ~= state.bufnr then
@@ -68,16 +74,53 @@ local function bridge_request(kind, submission, expected_type, callback)
   end)
 end
 
-function M.attach(raw_id)
-  state.generation = state.generation + 1
-  local generation = state.generation
-  state.phase = "attaching"
-  local manifest, lookup_error = registry.lookup(raw_id)
-  if not manifest then
-    state.phase = "detached"
-    notify(lookup_error, vim.log.levels.ERROR)
-    return
+local function finish_attach(locator_id, snapshot, backend, file_slot)
+  local previous = state.bufnr
+  if state.file_slot and state.file_slot ~= file_slot then
+    file_store.unlock_attach(state.file_slot)
   end
+  state.backend = backend
+  state.file_slot = file_slot
+  state.snapshot = snapshot
+  state.actions = snapshot.quickActions
+  state.bufnr = scratch.open(locator_id, snapshot)
+  state.store = annotations.Store.new(state.bufnr, invalidate_submission)
+  state.pending = nil
+  state.scheduled_submission = nil
+  local restored, restore_error = draft.load(identity())
+  if restored then
+    state.store:replace(restored.annotations)
+    state.pending = restored.pendingSubmission
+  elseif restore_error then
+    notify(restore_error, vim.log.levels.WARN)
+  end
+  state.phase = "ready"
+  if previous and previous ~= state.bufnr and vim.api.nvim_buf_is_valid(previous) then
+    pcall(vim.api.nvim_buf_delete, previous, { force = true })
+  end
+  notify(string.format("Attached to Nvimotator %d with %d pending annotation%s.", locator_id,
+    state.store:count(), state.store:count() == 1 and "" or "s"))
+end
+
+local function attach_file(raw)
+  local slot, lookup_error = file_store.lookup(raw)
+  if not slot then
+    state.phase = "detached"
+    return nil, lookup_error
+  end
+  local locked, lock_error = file_store.lock_attach(slot)
+  if not locked then
+    state.phase = "detached"
+    return nil, lock_error
+  end
+  state.manifest = nil
+  finish_attach(slot.id, slot.snapshot, "file", slot)
+  return true
+end
+
+local function attach_live(raw_id, generation)
+  local manifest, lookup_error = registry.lookup(raw_id)
+  if not manifest then return nil, lookup_error end
   local request = protocol.base(manifest, "snapshot")
   client.request(manifest, request, function(response, request_error)
     if generation ~= state.generation then return end
@@ -93,29 +136,56 @@ function M.attach(raw_id)
       notify(validation_error and protocol.error_message(validation_error) or "Authenticated snapshot does not match the registry manifest.", vim.log.levels.ERROR)
       return
     end
-
-    local previous = state.bufnr
     state.manifest = manifest
-    state.snapshot = snapshot
-    state.actions = snapshot.quickActions
-    state.bufnr = scratch.open(manifest.bridgeId, snapshot)
-    state.store = annotations.Store.new(state.bufnr, invalidate_submission)
-    state.pending = nil
-    state.scheduled_submission = nil
-    local restored, restore_error = draft.load(identity())
-    if restored then
-      state.store:replace(restored.annotations)
-      state.pending = restored.pendingSubmission
-    elseif restore_error then
-      notify(restore_error, vim.log.levels.WARN)
-    end
-    state.phase = "ready"
-    if previous and previous ~= state.bufnr and vim.api.nvim_buf_is_valid(previous) then
-      pcall(vim.api.nvim_buf_delete, previous, { force = true })
-    end
-    notify(string.format("Attached to Nvimotator %d with %d pending annotation%s.", manifest.bridgeId,
-      state.store:count(), state.store:count() == 1 and "" or "s"))
+    finish_attach(manifest.bridgeId, snapshot, "live", nil)
   end)
+  return true
+end
+
+function M.attach(raw_id)
+  state.generation = state.generation + 1
+  local generation = state.generation
+  state.phase = "attaching"
+  local trimmed = vim.trim(tostring(raw_id or ""))
+  if file_store.looks_like_path(trimmed) then
+    local ok, err = attach_file(trimmed)
+    if not ok then notify(err, vim.log.levels.ERROR) end
+    return
+  end
+  local live_ok, live_error = attach_live(trimmed, generation)
+  if live_ok then return end
+  local file_ok, file_error = attach_file(trimmed)
+  if not file_ok then
+    state.phase = "detached"
+    notify(live_error or file_error, vim.log.levels.ERROR)
+  end
+end
+
+local function detach_local()
+  state.phase = "detached"
+  state.scheduled_submission = nil
+  state.manifest = nil
+  state.pending = nil
+  if state.file_slot then
+    file_store.unlock_attach(state.file_slot)
+  end
+  state.file_slot = nil
+  state.backend = nil
+end
+
+function M.cancel()
+  if is_file_backend() then
+    file_store.mark_cancelled(state.file_slot)
+    detach_local()
+    notify("Cancelled; the Nvimotator file-store slot is free.")
+    return
+  end
+  if not state.manifest then
+    notify("Nothing to cancel.")
+    return
+  end
+  detach_local()
+  notify("Detached. The host bridge is still running; attach again with :NvimotatorAttach.")
 end
 
 function M.attach_prompt()
@@ -215,6 +285,21 @@ end
 function M.export()
   local submission = frozen_submission()
   if not submission then return end
+  if is_file_backend() then
+    local prompt, wrap_error = feedback.build_wrapped(state.snapshot, protocol.wire_annotations(submission.annotations))
+    if not prompt then
+      notify(wrap_error, vim.log.levels.ERROR)
+      return
+    end
+    local ok, clipboard_error = pcall(copy_to_clipboard, prompt)
+    if not ok or clipboard_error == false then
+      notify("Could not export Nvimotator feedback to the clipboard.", vim.log.levels.ERROR)
+      return
+    end
+    notify(string.format("Exported %d annotation%s to the clipboard.", #submission.annotations,
+      #submission.annotations == 1 and "" or "s"))
+    return
+  end
   state.phase = "rendering"
   bridge_request("render", submission, "rendered", function(response, request_error)
     state.phase = "ready"
@@ -247,11 +332,26 @@ local function finish_submission(submission_id)
     state.scheduled_submission = nil
     state.manifest = nil
     draft.delete(identity())
-    notify("Feedback scheduled in Pi; the Nvimotator bridge is closed.")
+    notify("Feedback scheduled; the Nvimotator bridge is closed.")
   end)
 end
 
 function M.send()
+  if is_file_backend() then
+    local submission = frozen_submission()
+    if not submission then return end
+    local written, write_error = file_store.write_annotation(state.file_slot, submission.annotations)
+    if not written then
+      notify(write_error, vim.log.levels.ERROR)
+      return
+    end
+    state.pending = nil
+    draft.delete(identity())
+    local path = written.annotation_path
+    detach_local()
+    notify("Wrote Nvimotator annotation to " .. path)
+    return
+  end
   if state.phase == "ready" and state.store and state.store:count() == 0 and state.scheduled_submission then
     finish_submission(state.scheduled_submission)
     return

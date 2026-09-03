@@ -38,7 +38,17 @@ async function assertPrivateDirectory(path: string): Promise<void> {
 
 export async function ensureRegistryDirectory(): Promise<string> {
   const directory = registryDirectory();
+  let existed = true;
+  try {
+    await lstat(directory);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    existed = false;
+  }
   await mkdir(directory, { recursive: true, mode: DIRECTORY_MODE });
+  // mkdir() honors umask (commonly 0022). Tighten only a directory we just created;
+  // an existing too-open override must stay rejected without chmod.
+  if (!existed) await chmod(directory, DIRECTORY_MODE);
   await assertPrivateDirectory(directory);
   return directory;
 }

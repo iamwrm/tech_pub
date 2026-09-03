@@ -1,0 +1,16 @@
+{
+  "name": "nvimotator",
+  "owner": {
+    "name": "iamwrm"
+  },
+  "metadata": {
+    "description": "Nvimotator for Claude Code: Neovim annotation of the latest assistant message or a local file."
+  },
+  "plugins": [
+    {
+      "name": "nvimotator",
+      "source": "./packages/pi-nvimotator/claude",
+      "description": "Annotate the latest Claude Code assistant message or a local file in Neovim via a file-store CLI. After Send, Read the printed annotation path."
+    }
+  ]
+}

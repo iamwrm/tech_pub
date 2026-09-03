@@ -16,9 +16,9 @@ NVIM_PANE=""
 SUCCEEDED=0
 
 mkdir -p "$ARTIFACTS" "$REGISTRY" "$FOREIGN_CWD" "$TEST_ROOT/home" "$TEST_ROOT/state" \
-  "$TEST_ROOT/cache" "$TEST_ROOT/config" "$TEST_ROOT/pi-agent" "$TEST_ROOT/sessions" "$TEST_ROOT/plannotator"
-chmod 700 "$TEST_ROOT" "$ARTIFACTS" "$REGISTRY" "$FOREIGN_CWD" "$TEST_ROOT/home" "$TEST_ROOT/state" \
-  "$TEST_ROOT/cache" "$TEST_ROOT/config" "$TEST_ROOT/pi-agent" "$TEST_ROOT/sessions" "$TEST_ROOT/plannotator"
+  "$TEST_ROOT/cache" "$TEST_ROOT/config" "$TEST_ROOT/pi-agent" "$TEST_ROOT/sessions"
+chmod 700 "$ARTIFACTS" "$REGISTRY" "$FOREIGN_CWD" "$TEST_ROOT/home" "$TEST_ROOT/state" \
+  "$TEST_ROOT/cache" "$TEST_ROOT/config" "$TEST_ROOT/pi-agent" "$TEST_ROOT/sessions"
 
 cleanup() {
   local status=$?
@@ -56,18 +56,6 @@ nvim --version | head -1 >"$ARTIFACTS/nvim-version.txt"
 tmux -V >"$ARTIFACTS/tmux-version.txt"
 node --version >"$ARTIFACTS/node-version.txt"
 
-cat >"$TEST_ROOT/plannotator/config.json" <<'JSON'
-{
-  "prompts": {
-    "annotate": {
-      "messageFeedback": "NVIMOTATOR-E2E-BEGIN\n{{feedback}}\nNVIMOTATOR-E2E-END",
-      "fileFeedback": "NVIMOTATOR-FILE-BEGIN\n{{fileHeader}}: {{filePath}}\n{{feedback}}\nNVIMOTATOR-FILE-END"
-    }
-  }
-}
-JSON
-chmod 600 "$TEST_ROOT/plannotator/config.json"
-
 cat >"$TEST_ROOT/run-pi.sh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -79,7 +67,6 @@ exec env \
   XDG_CONFIG_HOME=$(printf '%q' "$TEST_ROOT/config") \
   PI_CODING_AGENT_DIR=$(printf '%q' "$TEST_ROOT/pi-agent") \
   PI_NVIMOTATOR_REGISTRY=$(printf '%q' "$REGISTRY") \
-  PLANNOTATOR_DATA_DIR=$(printf '%q' "$TEST_ROOT/plannotator") \
   NVIMOTATOR_E2E_ARTIFACTS=$(printf '%q' "$ARTIFACTS") \
   NVIMOTATOR_E2E_ASSISTANT=$(printf '%q' "$FIXTURES/assistant.md") \
   PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 \
@@ -220,8 +207,9 @@ if (value.kind !== "float" || value.overlap !== 0 || value.occupiedRows !== valu
 NODE
 nvim_expr "luaeval('nvimotator_e2e.export()')" >/dev/null
 wait_file "$EXPORT_PATH"
-grep -Fq 'NVIMOTATOR-E2E-BEGIN' "$EXPORT_PATH"
-grep -Fq 'NVIMOTATOR-E2E-END' "$EXPORT_PATH"
+grep -Fq 'last assistant message' "$EXPORT_PATH"
+grep -Fq 'Incorporate the comments and quick actions' "$EXPORT_PATH"
+grep -Fq '# Message Feedback' "$EXPORT_PATH"
 grep -Fq '> Tighten this line.' "$EXPORT_PATH"
 grep -Fq '> Explain the emoji context.' "$EXPORT_PATH"
 grep -Fq '> Overall feedback.' "$EXPORT_PATH"
@@ -269,12 +257,11 @@ NODE
 [[ $(nvim_expr "luaeval('nvimotator_e2e.annotate_line()')") == 1 ]]
 nvim_expr "luaeval('nvimotator_e2e.export()')" >/dev/null
 wait_file "$EXPORT_PATH"
-grep -Fq 'NVIMOTATOR-FILE-BEGIN' "$EXPORT_PATH"
-grep -Fq 'NVIMOTATOR-FILE-END' "$EXPORT_PATH"
+grep -Fq 'the local file' "$EXPORT_PATH"
 grep -Fq "$ANNOTATE_FILE" "$EXPORT_PATH"
 grep -Fq '> Tighten this line.' "$EXPORT_PATH"
 grep -Fq '# File Feedback' "$EXPORT_PATH"
-if grep -Fq 'NVIMOTATOR-E2E-BEGIN' "$EXPORT_PATH"; then echo "file export used last-message wrapper" >&2; exit 1; fi
+if grep -Fq 'the last assistant message' "$EXPORT_PATH"; then echo "file export used last-message wrapper" >&2; exit 1; fi
 if grep -Fq 'Assistant entry:' "$EXPORT_PATH"; then echo "file export marked as last-message" >&2; exit 1; fi
 nvim_expr "luaeval('nvimotator_e2e.send()')" >/dev/null
 wait_file "$ARTIFACTS/request-3.bin"
