@@ -12,8 +12,9 @@ original copyright remains with its owner.
 
 ## Plannotator
 
-`@plannotator/pi-extension` is an exact-pinned runtime dependency used for its
-configured message-feedback prompt wrapper. Plannotator is Copyright its
-contributors and is distributed under `MIT OR Apache-2.0`. See
-<https://github.com/backnotprop/plannotator> and the dependency distribution
-for its complete license terms.
+Quick-action labels (`Deletion`, `Looks good`, and the ten default quick
+labels) and the overall last-message / file-annotate product shape follow
+[backnotprop/plannotator](https://github.com/backnotprop/plannotator) as prior
+art. Plannotator is not a runtime dependency of this package; its generated
+prompt templates are not copied here. Plannotator is Copyright its contributors
+and is distributed under `MIT OR Apache-2.0`.

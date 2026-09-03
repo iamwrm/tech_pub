@@ -1,0 +1,14 @@
+[
+  {
+    "id": "file-line-comment",
+    "kind": "comment",
+    "anchor": {
+      "selection": "line",
+      "startLine": 2,
+      "startByte": 0,
+      "endLine": 2,
+      "endByte": 10
+    },
+    "comment": "Say more about this line"
+  }
+]

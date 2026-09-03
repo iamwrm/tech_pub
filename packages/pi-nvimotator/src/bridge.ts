@@ -2,13 +2,14 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
 import { createServer, type Server, type Socket } from "node:net";
 import { TextDecoder } from "node:util";
 import type { MessageSnapshot } from "./assistant-message.ts";
-import { FeedbackError, getQuickActions, type FeedbackWrapper } from "./feedback.ts";
+import { FeedbackError, type FeedbackWrapper } from "./feedback.ts";
 import {
   CONNECTION_TIMEOUT_MS,
   MAX_CONCURRENT_CONNECTIONS,
   MAX_REQUEST_BYTES,
   MAX_RESPONSE_BYTES,
   PROTOCOL_VERSION,
+  QUICK_ACTIONS,
   errorResponse,
   parseRequest,
   type BridgeManifest,
@@ -261,7 +262,7 @@ export class NvimotatorBridge {
             entryId: this.snapshot.entryId,
             messageHash: this.snapshot.messageHash,
             text: this.snapshot.text,
-            quickActions: getQuickActions(),
+            quickActions: QUICK_ACTIONS,
             kind: this.snapshot.kind ?? "message",
             ...(this.snapshot.kind === "file" && this.snapshot.filePath ? { filePath: this.snapshot.filePath } : {}),
           },
