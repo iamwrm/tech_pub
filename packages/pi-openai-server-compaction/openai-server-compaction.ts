@@ -11,7 +11,7 @@
  * from `ren-public-package` `0021-gpt-reasoning-replay.ts` (IV-0008 owns the
  * semantics; keep the vendored copy in sync).
  *
- * Persisted entry-type names deliberately keep the `ren-public-package.*`
+ * Persisted entry-type names keep the `ren-public-package.*`
  * prefix so transcript cards already written into existing sessions keep
  * rendering after the promotion.
  */
@@ -43,6 +43,7 @@ import {
 } from "./gpt-reasoning-replay.ts";
 
 export const SERVER_COMPACTION_ENV = "PI_OPENAI_SERVER_COMPACTION";
+export const SERVER_COMPACTION_COMMAND = "server-compaction";
 export const SERVER_COMPACTION_STRATEGY = "openai-responses-compaction-v2";
 export const SERVER_COMPACTION_SHIM_SUMMARY = "[OpenAI native compaction checkpoint]";
 export const SERVER_COMPACTION_DISPLAY_ENTRY_TYPE = "ren-public-package.openai-native-compaction";
@@ -123,7 +124,7 @@ type ModelRoute = {
 	baseUrl?: unknown;
 };
 
-type CompactionAdapterKind = "codex-trigger-sse" | "standard-responses-json";
+export type CompactionAdapterKind = "codex-trigger-sse" | "standard-responses-json";
 
 type CanonicalCompactionBackend = {
 	adapter: CompactionAdapterKind;
@@ -369,6 +370,106 @@ export function isSupportedStandardResponsesModel(model: unknown): boolean {
 
 export function isSupportedServerCompactionModel(model: unknown): boolean {
 	return resolveCompactionBackend(model) !== undefined;
+}
+
+export type ServerCompactionPairStatus = {
+	active: boolean;
+	featureEnabled: boolean;
+	supported: boolean;
+	provider?: string;
+	api?: string;
+	model?: string;
+	baseUrl?: string;
+	adapter?: CompactionAdapterKind;
+	compactionUrl?: string;
+	reason: string;
+};
+
+export function formatServerCompactionAllowlist(): string {
+	const standard = [...STANDARD_RESPONSES_MODELS.entries()]
+		.map(([provider, config]) => {
+			const models = [...config.models];
+			return models.length === 1 ? `${provider}/${models[0]}` : `${provider}/{${models.join(",")}}`;
+		})
+		.join("; ");
+	return `openai-codex; ${standard}`;
+}
+
+export function inspectServerCompactionPair(
+	model: unknown,
+	envValue: string | undefined = process.env[SERVER_COMPACTION_ENV],
+): ServerCompactionPairStatus {
+	const enabled = featureEnabled(envValue);
+	if (!isRecord(model) || typeof model.provider !== "string" || typeof model.id !== "string" || !model.provider || !model.id) {
+		return {
+			active: false,
+			featureEnabled: enabled,
+			supported: false,
+			reason: "no current provider/model pair",
+		};
+	}
+	const backend = resolveCompactionBackend(model);
+	const supported = backend !== undefined;
+	const identity = {
+		provider: model.provider,
+		...(typeof model.api === "string" && model.api ? { api: model.api } : {}),
+		model: model.id,
+		...(backend
+			? { baseUrl: backend.baseUrl, adapter: backend.adapter, compactionUrl: backend.compactionUrl }
+			: typeof model.baseUrl === "string" && model.baseUrl
+				? { baseUrl: model.baseUrl }
+				: {}),
+	};
+	if (!enabled) {
+		return {
+			...identity,
+			active: false,
+			featureEnabled: false,
+			supported,
+			reason: supported
+				? `disabled by ${SERVER_COMPACTION_ENV}`
+				: `disabled by ${SERVER_COMPACTION_ENV}; pair is not on the Compaction V2 allowlist`,
+		};
+	}
+	if (supported) {
+		return {
+			...identity,
+			active: true,
+			featureEnabled: true,
+			supported: true,
+			reason: `allowlisted ${backend.adapter} route`,
+		};
+	}
+	return {
+		...identity,
+		active: false,
+		featureEnabled: true,
+		supported: false,
+		reason: isDecoratedApiModel(model)
+			? "provider is decorated, but this model or base URL is not on the Compaction V2 allowlist"
+			: "provider/model pair is not on the Compaction V2 allowlist",
+	};
+}
+
+export function formatServerCompactionStatus(status: ServerCompactionPairStatus): string {
+	const pair = status.provider && status.model ? `${status.provider}/${status.model}` : undefined;
+	const lines = [
+		pair
+			? `Server compaction: ${status.active ? "active" : "not active"} for ${pair}`
+			: "Server compaction: not active",
+	];
+	if (status.adapter) lines.push(`adapter: ${status.adapter}`);
+	if (status.compactionUrl) lines.push(`endpoint: ${status.compactionUrl}`);
+	else if (status.baseUrl) lines.push(`base URL: ${status.baseUrl}`);
+	if (status.api && !status.active) lines.push(`api: ${status.api}`);
+	if (!status.active) lines.push(`reason: ${status.reason}`);
+	if (!status.supported) lines.push(`allowlist: ${formatServerCompactionAllowlist()}`);
+	return lines.join("\n");
+}
+
+function serverCompactionStatusLevel(status: ServerCompactionPairStatus): "info" | "warning" {
+	if (!status.featureEnabled || (!status.provider && !status.model)) return "warning";
+	return "info";
 }
 
 function identityFor(model: ModelRoute): NativeIdentity {
@@ -801,13 +902,7 @@ export function parseStandardCompactionResponse(text: string): {
 	}
 	if (!isRecord(value)) throw new Error("OpenAI server compaction returned a non-object JSON response");
 	if (value.error !== undefined && value.error !== null) {
-		const failure = providerFailure(value, "provider error");
-		throw new RemoteCompactionError(
-			`OpenAI server compaction failed: ${failure.message}`,
-			failure.retryable,
-			failure.overload,
-			`OpenAI server compaction failed: ${failure.rawMessage}`,
-		);
+		throw providerFailure(value, "provider error");
 	}
 	if (value.status !== undefined && value.status !== "completed") {
 		throw new Error("OpenAI server compaction returned a non-completed status");
@@ -894,18 +989,18 @@ function readWireArtifact(value: unknown, location: string): ResponseItem | unde
 	return artifact;
 }
 
-function providerFailure(value: unknown, fallback: string): {
-	message: string;
-	rawMessage: string;
-	retryable: boolean;
-	overload: boolean;
-} {
+function providerFailure(value: unknown, fallback: string): RemoteCompactionError {
 	const record = isRecord(value) ? value : undefined;
 	const nested = record && isRecord(record.error) ? record.error : undefined;
 	const code = [nested?.code, record?.code].find((candidate) => typeof candidate === "string");
 	const message = [nested?.message, record?.message].find((candidate) => typeof candidate === "string") ?? fallback;
 	const overload = typeof code === "string" && RETRYABLE_PROVIDER_CODES.has(code);
-	return { message: safeDiagnostic(message), rawMessage: message, retryable: overload, overload };
+	return new RemoteCompactionError(
+		`OpenAI server compaction failed: ${safeDiagnostic(message)}`,
+		overload,
+		overload,
+		`OpenAI server compaction failed: ${message}`,
+	);
 }
 
 export function parseCompactionSse(text: string): {
@@ -930,23 +1025,11 @@ export function parseCompactionSse(text: string): {
 		}
 		if (typeof event.type === "string" && event.type.startsWith("response.")) sawLifecycleEvent = true;
 		if (event.type === "error") {
-			const failure = providerFailure(event, "provider error");
-			throw new RemoteCompactionError(
-				`OpenAI server compaction failed: ${failure.message}`,
-				failure.retryable,
-				failure.overload,
-				`OpenAI server compaction failed: ${failure.rawMessage}`,
-			);
+			throw providerFailure(event, "provider error");
 		}
 		if (event.type === "response.failed") {
 			const response = isRecord(event.response) ? event.response : undefined;
-			const failure = providerFailure(response, "response failed");
-			throw new RemoteCompactionError(
-				`OpenAI server compaction failed: ${failure.message}`,
-				failure.retryable,
-				failure.overload,
-				`OpenAI server compaction failed: ${failure.rawMessage}`,
-			);
+			throw providerFailure(response, "response failed");
 		}
 		if (event.type === "response.output_item.done") {
 			const item = readWireArtifact(event.item, "streamed");
@@ -960,13 +1043,7 @@ export function parseCompactionSse(text: string): {
 				throw new Error(`OpenAI server compaction completed with invalid status ${safeDiagnostic(response.status)}`);
 			}
 			if (response?.error !== undefined && response.error !== null) {
-				const failure = providerFailure(response, "response completed with an error");
-				throw new RemoteCompactionError(
-					`OpenAI server compaction failed: ${failure.message}`,
-					failure.retryable,
-					failure.overload,
-					`OpenAI server compaction failed: ${failure.rawMessage}`,
-				);
+				throw providerFailure(response, "response completed with an error");
 			}
 			if (response?.id !== undefined && !isSafeIdentifier(response.id)) {
 				throw new Error("OpenAI server compaction returned an invalid response id");
@@ -1676,19 +1753,14 @@ async function requestServerCompactionAttempt(
 			`${prefix}${diagnostic ? `: ${diagnostic}` : ""}`,
 		);
 	}
-	if (params.adapter === "standard-responses-json") {
-		const parsed = parseStandardCompactionResponse(responseText);
-		const usage = parseRemoteUsage(params.model, parsed.rawUsage);
-		return {
-			replacementHistory: parsed.replacementHistory,
-			...(parsed.responseId ? { responseId: parsed.responseId } : {}),
-			...(usage ? { usage } : {}),
-		};
-	}
-	const parsed = parseCompactionSse(responseText);
+	const parsed = params.adapter === "standard-responses-json"
+		? parseStandardCompactionResponse(responseText)
+		: parseCompactionSse(responseText);
 	const usage = parseRemoteUsage(params.model, parsed.rawUsage);
 	return {
-		replacementHistory: buildReplacementHistory(params.compactedInput, parsed.compactionItem),
+		replacementHistory: "replacementHistory" in parsed
+			? parsed.replacementHistory
+			: buildReplacementHistory(params.compactedInput, parsed.compactionItem),
 		...(parsed.responseId ? { responseId: parsed.responseId } : {}),
 		...(usage ? { usage } : {}),
 	};
@@ -1873,6 +1945,23 @@ export function createOpenAIServerCompactionExtension(dependencies: Dependencies
 			SERVER_COMPACTION_FALLBACK_ENTRY_TYPE,
 			(entry, _options, theme) => renderCompactionFallback(entry.data, theme),
 		);
+
+		pi.registerCommand(SERVER_COMPACTION_COMMAND, {
+			description: "Show whether the current provider/model pair uses native Responses server compaction",
+			getArgumentCompletions: (prefix) =>
+				["status"]
+					.filter((arg) => arg.startsWith(prefix.trim().toLowerCase()))
+					.map((arg) => ({ value: arg, label: arg })),
+			handler: async (args, ctx) => {
+				const arg = args.trim().toLowerCase();
+				if (arg !== "" && arg !== "status") {
+					if (ctx.hasUI) ctx.ui.notify("Usage: /server-compaction [status]", "warning");
+					return;
+				}
+				const status = inspectServerCompactionPair(ctx.model, process.env[SERVER_COMPACTION_ENV]);
+				if (ctx.hasUI) ctx.ui.notify(formatServerCompactionStatus(status), serverCompactionStatusLevel(status));
+			},
+		});
 
 		pi.on("session_start", reset);
 		pi.on("session_tree", reset);

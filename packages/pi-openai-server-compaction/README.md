@@ -54,6 +54,11 @@ compaction.
   Codex account/feature headers. `PI_OPENAI_SERVER_COMPACTION=0` (also `false`,
   `no`, or `off`) is the emergency opt-out.
 
+`/server-compaction` (optional `status`) reports whether the current
+provider/model/base-URL pair is on this allowlist and whether the opt-out is
+set. It is diagnostic only: it does not enable, disable, or probe the remote
+compaction endpoint.
+
 ## Install and development
 
 ```bash
@@ -68,7 +73,7 @@ cards still render.
 ```bash
 npm install        # dev dependencies (typecheck + tests)
 npm run check      # strict tsc --noEmit
-npm test           # node:test unit + integration suites (jiti)
+npm test           # typecheck + node:test unit/integration suites (jiti)
 ```
 
 The package has no runtime dependency. `gpt-reasoning-replay.ts` is a vendored

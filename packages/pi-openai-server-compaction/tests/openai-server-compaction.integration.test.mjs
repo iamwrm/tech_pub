@@ -22,6 +22,32 @@ function model(id, contextWindow = 272_000) {
 	};
 }
 
+/** Run `pi --list-models <search>` in a scratch agent dir, optionally with this extension loaded. */
+function runListModels(agentDir, search, extension) {
+	return spawnSync(piBin, [
+		"--offline",
+		"--no-extensions",
+		...(extension === undefined ? [] : ["--extension", extension]),
+		"--list-models", search,
+	], {
+		cwd: pkgDir,
+		env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
+		encoding: "utf8",
+		timeout: 30_000,
+	});
+}
+
+/** "xai grok-4.3" rows of `--list-models` output, header row skipped. */
+function listedModelIds(stdout) {
+	const ids = new Set();
+	for (const line of stdout.split("\n")) {
+		const [provider, id] = line.trim().split(/\s+/);
+		if (!provider || !id || provider === "provider") continue;
+		ids.add(`${provider} ${id}`);
+	}
+	return ids;
+}
+
 test("Pi composes Fluxion stream decorators above models.json without replacing GPT, Grok, or Kimi catalogs", () => {
 	const agentDir = mkdtempSync(path.join(tmpdir(), "pi-openai-server-compaction-model-composition-"));
 	try {
@@ -88,24 +114,28 @@ test("Pi composes the xAI stream decorator above models.json without replacing G
 		}, null, 2)}\n`);
 		writeFileSync(path.join(agentDir, "settings.json"), "{}\n");
 
-		const result = spawnSync(piBin, [
-			"--offline",
-			"--no-extensions",
-			"--extension", extensionPath,
-			"--list-models", "xai",
-		], {
-			cwd: pkgDir,
-			env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
-			encoding: "utf8",
-			timeout: 30_000,
-		});
+		// Baseline catalog: the builtin xAI models merged with models.json, as pi
+		// builds it without this extension. Read it at runtime rather than
+		// hardcoding ids, so the assertion survives a pi catalog change.
+		const baseline = runListModels(agentDir, "xai");
+		assert.equal(baseline.status, 0, baseline.stderr || baseline.stdout);
+		const baselineIds = listedModelIds(baseline.stdout);
+
+		// Guard: the baseline must expose builtin xAI models beyond models.json,
+		// otherwise the survival check below would pass vacuously.
+		assert.ok(
+			[...baselineIds].some((id) => id !== "xai grok-4.6"),
+			`baseline xAI catalog carries no builtin model beyond models.json:\n${baseline.stdout}`,
+		);
+
+		const result = runListModels(agentDir, "xai", extensionPath);
 		assert.equal(result.status, 0, result.stderr || result.stdout);
-		for (const expected of [
-			"xai  grok-4.6",
-			"xai  grok-4.5",
-			"xai  grok-4.3",
-			"xai  grok-build-0.1",
-		]) assert.match(result.stdout.replace(/\s+/g, " "), new RegExp(expected.replace(/\s+/g, "\\s+")));
+		const decoratedIds = listedModelIds(result.stdout);
+		for (const id of baselineIds) {
+			assert.ok(decoratedIds.has(id), `extension dropped ${id} from the xAI catalog:\n${result.stdout}`);
+		}
+		// models.json entries are merged above the builtin catalog.
+		assert.match(result.stdout.replace(/\s+/g, " "), /xai\s+grok-4\.6/);
 	} finally {
 		rmSync(agentDir, { recursive: true, force: true });
 	}

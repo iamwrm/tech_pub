@@ -22,6 +22,7 @@ const {
 	REMOTE_COMPACTION_OVERLOAD_RETRY_BASE_DELAY_MS,
 	REMOTE_COMPACTION_RETRY_BASE_DELAY_MS,
 	RETAINED_USER_TOKEN_BUDGET,
+	SERVER_COMPACTION_COMMAND,
 	SERVER_COMPACTION_DISPLAY_ENTRY_TYPE,
 	SERVER_COMPACTION_DISPLAY_TEXT,
 	SERVER_COMPACTION_ENV,
@@ -40,6 +41,9 @@ const {
 	extractServerCompactionDetails,
 	featureEnabled,
 	formatCompactionUsage,
+	formatServerCompactionAllowlist,
+	formatServerCompactionStatus,
+	inspectServerCompactionPair,
 	injectReplayIntoSummarizationPayload,
 	isPiSummarizationPayload,
 	isSupportedCodexModel,
@@ -294,48 +298,38 @@ function standardNativeDetails(activeModel = fluxionGpt55, overrides = {}) {
 	});
 }
 
-function withFeatureSetting(value, fn) {
-	const previous = process.env[SERVER_COMPACTION_ENV];
-	if (value === undefined) delete process.env[SERVER_COMPACTION_ENV];
-	else process.env[SERVER_COMPACTION_ENV] = value;
+function withEnvSetting(name, value, fn) {
+	const previous = process.env[name];
+	if (value === undefined) delete process.env[name];
+	else process.env[name] = value;
 	return Promise.resolve()
 		.then(fn)
 		.finally(() => {
-			if (previous === undefined) delete process.env[SERVER_COMPACTION_ENV];
-			else process.env[SERVER_COMPACTION_ENV] = previous;
+			if (previous === undefined) delete process.env[name];
+			else process.env[name] = previous;
 		});
 }
 
-function withFeatureEnabled(fn) {
-	return withFeatureSetting("1", fn);
-}
-
-function withReasoningReplaySetting(value, fn) {
-	const previous = process.env[GPT_REASONING_REPLAY_ENV];
-	if (value === undefined) delete process.env[GPT_REASONING_REPLAY_ENV];
-	else process.env[GPT_REASONING_REPLAY_ENV] = value;
-	return Promise.resolve()
-		.then(fn)
-		.finally(() => {
-			if (previous === undefined) delete process.env[GPT_REASONING_REPLAY_ENV];
-			else process.env[GPT_REASONING_REPLAY_ENV] = previous;
-		});
-}
+const withFeatureSetting = (value, fn) => withEnvSetting(SERVER_COMPACTION_ENV, value, fn);
+const withFeatureEnabled = (fn) => withFeatureSetting("1", fn);
+const withReasoningReplaySetting = (value, fn) => withEnvSetting(GPT_REASONING_REPLAY_ENV, value, fn);
 
 function stubExtension({ fetchFn = async () => compactionResponse(), sleepFn, tools = [] } = {}) {
 	const handlers = new Map();
 	const renderers = new Map();
 	const providers = new Map();
+	const commands = new Map();
 	const appendedEntries = [];
 	const pi = {
 		on: (name, handler) => handlers.set(name, handler),
 		registerProvider: (name, config) => providers.set(name, config),
 		registerEntryRenderer: (customType, renderer) => renderers.set(customType, renderer),
+		registerCommand: (name, definition) => commands.set(name, definition),
 		appendEntry: (customType, data) => appendedEntries.push({ customType, data }),
 		getAllTools: () => tools,
 	};
 	createOpenAIServerCompactionExtension({ fetchFn, sleepFn })(pi);
-	return { handlers, renderers, providers, appendedEntries };
+	return { handlers, renderers, providers, commands, appendedEntries };
 }
 
 function hookContext(branch, options = {}) {
@@ -518,6 +512,91 @@ test("standard Responses compaction uses an exact per-model enterprise-mirror al
 		{ ...fluxionGpt55, provider: "xai", id: "grok-4.5" },
 		{ ...xaiGrok46, id: "grok-4.7" },
 	]) assert.equal(isSupportedStandardResponsesModel(candidate), false, JSON.stringify(candidate));
+});
+
+test("/server-compaction reports whether the current pair is on the Compaction V2 allowlist", async () => {
+	assert.equal(
+		formatServerCompactionAllowlist(),
+		"openai-codex; fluxion-gpt/{gpt-5.5,gpt-5.6-sol}; fluxion-grok/{grok-4.5,grok-4.6}; xai/grok-4.6",
+	);
+
+	const activeCodex = inspectServerCompactionPair(model, undefined);
+	assert.deepEqual(activeCodex, {
+		active: true,
+		featureEnabled: true,
+		supported: true,
+		provider: "openai-codex",
+		api: "openai-codex-responses",
+		model: "gpt-test",
+		baseUrl: "https://chatgpt.com/backend-api",
+		adapter: "codex-trigger-sse",
+		compactionUrl: "https://chatgpt.com/backend-api/codex/responses",
+		reason: "allowlisted codex-trigger-sse route",
+	});
+	assert.equal(
+		formatServerCompactionStatus(activeCodex),
+		[
+			"Server compaction: active for openai-codex/gpt-test",
+			"adapter: codex-trigger-sse",
+			"endpoint: https://chatgpt.com/backend-api/codex/responses",
+		].join("\n"),
+	);
+
+	const activeXai = inspectServerCompactionPair(xaiGrok46, "1");
+	assert.equal(activeXai.active, true);
+	assert.equal(activeXai.adapter, "standard-responses-json");
+	assert.equal(activeXai.compactionUrl, "https://api.x.ai/v1/responses/compact");
+
+	const unsupported = inspectServerCompactionPair({ provider: "anthropic", api: "anthropic-messages", id: "claude-opus-4-6" }, undefined);
+	assert.equal(unsupported.active, false);
+	assert.equal(unsupported.supported, false);
+	assert.match(formatServerCompactionStatus(unsupported), /not on the Compaction V2 allowlist/);
+	assert.match(formatServerCompactionStatus(unsupported), /allowlist: openai-codex;/);
+
+	const wrongBaseUrl = inspectServerCompactionPair({ ...fluxionGpt55, baseUrl: "https://fluxionai.space/v1/extra" }, undefined);
+	assert.equal(wrongBaseUrl.supported, false);
+	assert.match(wrongBaseUrl.reason, /decorated/);
+	assert.match(formatServerCompactionStatus(wrongBaseUrl), /base URL: https:\/\/fluxionai.space\/v1\/extra/);
+
+	const optedOut = inspectServerCompactionPair(model, "0");
+	assert.equal(optedOut.active, false);
+	assert.equal(optedOut.supported, true);
+	assert.equal(optedOut.reason, `disabled by ${SERVER_COMPACTION_ENV}`);
+	assert.equal(formatServerCompactionStatus(optedOut).includes("allowlist:"), false);
+
+	const missing = inspectServerCompactionPair(undefined, undefined);
+	assert.equal(missing.active, false);
+	assert.equal(missing.reason, "no current provider/model pair");
+
+	const runtime = stubExtension();
+	const command = runtime.commands.get(SERVER_COMPACTION_COMMAND);
+	assert.equal(command.description.includes("provider/model pair"), true);
+	assert.deepEqual(command.getArgumentCompletions("sta"), [{ value: "status", label: "status" }]);
+	assert.deepEqual(command.getArgumentCompletions("x"), []);
+
+	await withFeatureSetting(undefined, async () => {
+		const notices = [];
+		await command.handler("", hookContext([], { notices }));
+		assert.deepEqual(notices, [{
+			message: formatServerCompactionStatus(inspectServerCompactionPair(model, undefined)),
+			level: "info",
+		}]);
+
+		notices.length = 0;
+		await command.handler("nope", hookContext([], { notices }));
+		assert.deepEqual(notices, [{ message: "Usage: /server-compaction [status]", level: "warning" }]);
+
+		const silent = [];
+		await command.handler("", hookContext([], { notices: silent, hasUI: false }));
+		assert.deepEqual(silent, []);
+	});
+
+	await withFeatureSetting("off", async () => {
+		const notices = [];
+		await command.handler("status", hookContext([], { notices }));
+		assert.equal(notices[0].level, "warning");
+		assert.match(notices[0].message, new RegExp(`disabled by ${SERVER_COMPACTION_ENV}`));
+	});
 });
 
 test("standard compact requests project only the unary API fields and use ordinary Bearer JSON headers", () => {

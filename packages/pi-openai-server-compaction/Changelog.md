@@ -2,10 +2,25 @@
 
 ## Unreleased
 
+- Re-validate against Pi 0.85.1: the development dependencies and lockfile move
+  to 0.85.1; strict typecheck and the 59-test suite pass. The xAI composition
+  test now compares `pi --list-models xai` with and without the extension
+  instead of hardcoding builtin Grok ids, because pi-ai 0.85.1 replaced the
+  builtin `grok-build-0.1` entry with `grok-4.6`.
+- Share provider-error construction across JSON and SSE parsers, preserving
+  redaction and retry classification. Share test environment cleanup.
+- Include strict TypeScript checking in `npm test`.
+
+## [0.2.0] - 2026-08-14
+
+- Add read-only `/server-compaction` (`status` optional) so an operator can see
+  whether the current provider/model/base-URL pair is on the Compaction V2
+  allowlist and whether `PI_OPENAI_SERVER_COMPACTION` has opted out. The command
+  does not toggle the feature or claim that a compact would succeed. Focused
+  coverage is one new unit test; the package suite is 59/59.
 - Compress the README around qualified routes, failure ownership, safety, and
   installation while retaining the complete operator contract.
-- Correct the README's relative lifecycle-document links. Runtime behavior is
-  unchanged.
+- Correct the README's relative lifecycle-document links.
 
 ## [0.1.0] - 2026-08-13
 
@@ -28,7 +43,7 @@
     transcript cards, and `PI_OPENAI_SERVER_COMPACTION=0` as the emergency
     opt-out.
   - The GPT reasoning replay projection used at the branch-tail conversion
-    choke point is vendored from `ren-public-package` `0021-gpt-reasoning-replay.ts`
+    step is vendored from `ren-public-package` `0021-gpt-reasoning-replay.ts`
     (pure helpers only; see `gpt-reasoning-replay.ts` header and IV-0008).
     Keep the vendored copy in sync with the authoritative 0021 module.
   - Persisted entry-type names keep the historical
