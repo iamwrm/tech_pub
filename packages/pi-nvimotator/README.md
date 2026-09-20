@@ -1,10 +1,30 @@
 # pi-nvimotator
 
-Private, path-installed Pi extension plus dependency-free Neovim plugin for
-annotating the latest assistant response or a local file. Run `/nvim-last` or
-`/nvim-annotate <path>`, attach to the small numeric ID from any same-host
-shell, then send structured line/selection feedback or copy the exact same
-Plannotator-wrapped prompt.
+This package is the Neovim annotation UI plus three hosts: a Pi live Unix
+bridge, and Claude Code and Codex file-store CLIs in nested folders. Snapshot
+the latest assistant response or a local file, attach to the small numeric ID
+from any same-host shell, then send structured line/selection feedback or copy
+the exact same wrapped prompt.
+
+Lifecycle: Pi [`IV-0027`](../../docs/IV-DC/IV-0027-pi-nvimotator.md), Claude
+Code [`IV-0029`](../../docs/IV-DC/IV-0029-claude-nvimotator.md), Codex
+[`IV-0030`](../../docs/IV-DC/IV-0030-codex-nvimotator.md).
+
+## Hosts
+
+| Host | Install | Commands |
+| --- | --- | --- |
+| **Pi** | `pi install ./packages/pi-nvimotator` | `/nvim-last` (live Unix socket) |
+| **Claude Code** | Nested [`claude/`](./claude/README.md): `/plugin marketplace add iamwrm/piagent-config` then `/plugin install nvimotator@nvimotator` | `/nvim-last` then `/nvim-import` (stdout is an absolute path to Read) |
+| **Codex** | Nested [`codex/`](./codex/README.md): from this directory, `npm ci && npm run build` then `./codex/scripts/install-skills.sh` | `$nvim-last` / `$nvim-import` (no marketplace) |
+
+The shared Neovim plugin is this **package root** (`plugin/`, `lua/`). Put
+`packages/pi-nvimotator` on `runtimepath`. Do not add `claude/` or `codex/`.
+
+Pi uses an owner-only live Unix socket (`PI_NVIMOTATOR_REGISTRY`). Claude Code
+and Codex use a **separate** file store (default `~/.nvimotator`, override
+`NVIMOTATOR_STORE`). `:NvimotatorAttach` tries the live registry first, then
+the file store. Do not point `NVIMOTATOR_STORE` at the live-socket registry.
 
 ## Requirements
 
@@ -18,10 +38,9 @@ Plannotator-wrapped prompt.
 
 ## Install
 
-If you are starting from scratch, do these in order: mise, Neovim 0.12, latest
-kickstart.nvim, then this package. The Pi extension creates an owner-only Unix
-socket. The Neovim plugin provides `:NvimotatorAttach`, `<leader>nt`, and the
-annotation UI.
+These steps are the **Pi** host from scratch. Claude Code and Codex skip
+`pi install`; follow the [host map](#hosts), then the same Neovim runtimepath
+steps under **5. Load the Neovim plugin on kickstart**.
 
 ### 1. Install mise
 
@@ -72,26 +91,25 @@ GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0= nvim
 
 ### 4. Install the Pi extension
 
-A local Pi path install does not install npm dependencies, so install them
-first, then register the package with Pi:
+There is no runtime npm package to install. Register the path with Pi:
 
 ```bash
-cd /absolute/path/to/tech_pub/packages/pi-nvimotator
-npm ci
-cd /absolute/path/to/tech_pub
+cd /absolute/path/to/piagent-config
 pi install ./packages/pi-nvimotator
 ```
 
+`npm ci` in this directory is only needed for typecheck, unit tests, and the
+headless Neovim / tmux e2e gates.
+
 ### 5. Load the Neovim plugin on kickstart
 
-The plugin is a normal `plugin/` plus `lua/` tree. Put the package root on
-Neovim's runtimepath. `vim.pack` only clones git URIs, so a local path plugin
-cannot go through `vim.pack.add`.
+Use the package root on `runtimepath`. `vim.pack.add` accepts Git URIs,
+not local plugin paths.
 
 Create `~/.config/nvim/lua/custom/plugins/pi-nvimotator.lua`:
 
 ```lua
-vim.opt.runtimepath:prepend '/absolute/path/to/tech_pub/packages/pi-nvimotator'
+vim.opt.runtimepath:prepend '/absolute/path/to/piagent-config/packages/pi-nvimotator'
 ```
 
 If `require 'custom.plugins'` is still commented in `init.lua`, uncomment it.
@@ -105,7 +123,7 @@ Skip the kickstart clone. Create `~/.config/nvim/lua/plugins/pi-nvimotator.lua`:
 return {
   {
     name = "pi-nvimotator",
-    dir = "/absolute/path/to/tech_pub/packages/pi-nvimotator",
+    dir = "/absolute/path/to/piagent-config/packages/pi-nvimotator",
     lazy = false,
   },
 }
@@ -125,40 +143,20 @@ The plugin owns and safely refreshes its commands and `<Plug>` mappings, so
 
 ### Latest assistant message
 
-In Pi:
-
-```text
-/nvim-last
-```
-
-Pi reports a numeric locator and the normal Neovim attach command, for example:
-
-```text
-Nvimotator ready (16)
-nvim -c 'NvimotatorAttach 16'
-```
+Run `/nvim-last` in Pi to snapshot the active branch's latest assistant message.
 
 ### Local file
 
-In Pi, pass a local markdown, text, config, HTML, or source file (or a folder
-to pick one such file):
-
-```text
-/nvim-annotate README.md
-```
-
-Pi reports the same style of locator. File annotation stays in Neovim; it does
-not open Plannotator's browser, fetch URLs, or launch a live app.
+Run `/nvim-annotate README.md` in Pi to snapshot a file. A directory argument
+opens a chooser for one allowlisted file. Pi reports a locator and command:
 
 ```text
 Nvimotator ready (16)
-File: /absolute/path/to/README.md
 nvim -c 'NvimotatorAttach 16'
 ```
 
-Run the attach command from any directory on the same host. The Neovim
-installation above makes `:NvimotatorAttach` available, and the command opens
-the captured assistant message or file as an immutable scratch buffer.
+Run the command from any directory on the same host/account. Neovim opens the
+snapshot as an immutable scratch buffer; file snapshots also report their path.
 
 | Neovim command or mapping | Action |
 | --- | --- |
@@ -169,7 +167,8 @@ the captured assistant message or file as an immutable scratch buffer.
 | `:NvimotatorComment` | Add an unanchored general comment. |
 | `:NvimotatorComments` | Browse, jump to, edit, delete, export, send, or clear all pending feedback. |
 | `:NvimotatorExport` | Copy the exact rendered feedback prompt to the `+` clipboard register. |
-| `:NvimotatorSend` | Schedule feedback in the originating Pi session and close the bridge. |
+| `:NvimotatorSend` | Live Pi: schedule feedback in the originating session and close the bridge. File-store (Claude/Codex): write wrapped `annotation.md` and copy it to `last/annotation.md`. |
+| `:NvimotatorCancel` | Detach. Live Pi keeps the host bridge running. File-store slots are freed. |
 | `:NvimotatorClear` | Confirm and clear this snapshot's pending annotations. |
 
 Comments open in a rounded multiline Markdown editor below the selected line,
@@ -226,7 +225,7 @@ Set `vim.g.pi_nvimotator_disable_default_mappings = true` before plugin load to
 use only the provided `<Plug>` mappings.
 
 Characterwise and linewise visual selections are supported. Blockwise visual
-mode is deliberately rejected.
+mode is rejected.
 
 ## Semantics and limits
 
@@ -243,12 +242,12 @@ mode is deliberately rejected.
   scope.
 - The Pi process must remain open. Reload, new/resumed/forked sessions, or exit
   close the bridge.
-- Last-message feedback uses Plannotator's configured
-  `prompts.annotate.messageFeedback` template. File feedback uses
-  `prompts.annotate.fileFeedback`, includes the file path, and is marked as a
-  file/document annotation rather than last-assistant-message feedback. Export
-  freezes the rendered bytes; a later Send of the unchanged annotations
-  schedules those exact bytes.
+- Last-message feedback is wrapped with a short local instruction: this is user
+  annotation on the last assistant message, and comments/quick actions should be
+  incorporated. File feedback uses the same wrap with the local file path, and
+  is marked as a file/document annotation rather than last-assistant-message
+  feedback. Export freezes the rendered bytes; a later Send of the unchanged
+  annotations schedules those exact bytes.
 - A successful bridge acknowledgement means Pi accepted the synchronous
   scheduling call. Pi's public API does not prove durable transcript
   persistence, and deduplication lasts only for the live bridge.
@@ -262,8 +261,8 @@ mode is deliberately rejected.
   and cursor on save, cancel, window close, or error. It never inserts buffer
   lines or changes feedback anchors.
 
-Override the shared registry and Unix-socket directory for both processes with
-an absolute, short, owner-only path:
+Override the shared live-socket registry and Unix-socket directory for both
+Pi and Neovim with an absolute, short, owner-only path:
 
 ```bash
 export PI_NVIMOTATOR_REGISTRY="$HOME/.cache/pi-nvimotator/registry"
@@ -284,3 +283,11 @@ npm pack --dry-run
 
 `npm run test:e2e` uses isolated real Pi and Neovim processes in tmux with a
 local deterministic fake provider; it makes no external model request.
+
+## Claude Code and Codex hosts
+
+Install and command details are in the [host map](#hosts) and the nested
+READMEs: [`claude/`](./claude/README.md), [`codex/`](./codex/README.md).
+
+`pi install ./packages/pi-nvimotator` still loads only `index.ts`. Rebuild host
+CLIs with `npm run build` from this directory.

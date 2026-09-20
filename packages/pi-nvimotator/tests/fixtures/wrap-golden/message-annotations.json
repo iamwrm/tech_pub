@@ -1,0 +1,31 @@
+[
+  {
+    "id": "line-comment",
+    "kind": "comment",
+    "anchor": {
+      "selection": "line",
+      "startLine": 1,
+      "startByte": 0,
+      "endLine": 1,
+      "endByte": 20
+    },
+    "comment": "Keep the first line"
+  },
+  {
+    "id": "general-comment",
+    "kind": "comment",
+    "comment": "Unanchored note for the whole message"
+  },
+  {
+    "id": "deletion-action",
+    "kind": "quickAction",
+    "anchor": {
+      "selection": "line",
+      "startLine": 2,
+      "startByte": 0,
+      "endLine": 2,
+      "endByte": 21
+    },
+    "actionId": "deletion"
+  }
+]

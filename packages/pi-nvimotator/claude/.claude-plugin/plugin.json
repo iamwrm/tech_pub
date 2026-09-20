@@ -1,0 +1,11 @@
+{
+  "name": "nvimotator",
+  "description": "Annotate the latest Claude Code assistant message or a local file in Neovim via a file-store CLI. Read the printed annotation path after Send.",
+  "version": "0.2.0",
+  "author": {
+    "name": "iamwrm"
+  },
+  "keywords": ["neovim", "annotations", "nvimotator", "plannotator"],
+  "commands": ["./commands"],
+  "skills": ["./skills"]
+}

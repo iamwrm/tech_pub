@@ -3,6 +3,7 @@ if vim.g.loaded_pi_nvimotator == 1 then return end
 local command_names = {
   "NvimotatorAttach", "NvimotatorAnnotate", "NvimotatorQuick", "NvimotatorComment",
   "NvimotatorComments", "NvimotatorExport", "NvimotatorSend", "NvimotatorClear",
+  "NvimotatorCancel",
 }
 local plug_keys = {
   { mode = "n", lhs = "<Plug>(NvimotatorAttach)" },
@@ -13,6 +14,7 @@ local plug_keys = {
   { mode = "n", lhs = "<Plug>(NvimotatorComment)" },
   { mode = "n", lhs = "<Plug>(NvimotatorComments)" },
   { mode = "n", lhs = "<Plug>(NvimotatorSend)" },
+  { mode = "n", lhs = "<Plug>(NvimotatorCancel)" },
 }
 
 local existing_commands = vim.api.nvim_get_commands({ builtin = false })
@@ -68,7 +70,7 @@ local function range(opts)
   return opts.line1, opts.line2
 end
 
-command("NvimotatorAttach", function(opts) nvimotator.attach(opts.args) end, { nargs = 1 })
+command("NvimotatorAttach", function(opts) nvimotator.attach(opts.args) end, { nargs = 1, complete = "file" })
 command("NvimotatorAnnotate", function(opts)
   local first, last = range(opts)
   nvimotator.annotate_range(first, last)
@@ -82,6 +84,7 @@ command("NvimotatorComments", function() nvimotator.comments() end)
 command("NvimotatorExport", function() nvimotator.export() end)
 command("NvimotatorSend", function() nvimotator.send() end)
 command("NvimotatorClear", function() nvimotator.clear() end)
+command("NvimotatorCancel", function() nvimotator.cancel() end)
 
 local plugs = {
   { mode = "n", lhs = "<Plug>(NvimotatorAttach)", rhs = function() nvimotator.attach_prompt() end },
@@ -98,6 +101,7 @@ local plugs = {
   { mode = "n", lhs = "<Plug>(NvimotatorComment)", rhs = function() nvimotator.comment() end },
   { mode = "n", lhs = "<Plug>(NvimotatorComments)", rhs = function() nvimotator.comments() end },
   { mode = "n", lhs = "<Plug>(NvimotatorSend)", rhs = function() nvimotator.send() end },
+  { mode = "n", lhs = "<Plug>(NvimotatorCancel)", rhs = function() nvimotator.cancel() end },
 }
 
 for _, mapping in ipairs(plugs) do

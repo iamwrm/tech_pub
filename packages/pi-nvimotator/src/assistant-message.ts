@@ -30,6 +30,8 @@ export class SnapshotError extends Error {
   }
 }
 
+const ENTRY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+
 function normalizedAssistantText(entry: MessageEntry): string | null {
   if (entry.type !== "message" || entry.message?.role !== "assistant") return null;
   if (!Array.isArray(entry.message.content)) return "";
@@ -38,6 +40,49 @@ function normalizedAssistantText(entry: MessageEntry): string | null {
     .map((block) => block.text)
     .join("\n")
     .replace(/\r\n?/g, "\n");
+}
+
+export function sanitizeSnapshotEntryId(raw: string): string {
+  const trimmed = raw.trim();
+  if (ENTRY_ID_PATTERN.test(trimmed) && Buffer.byteLength(trimmed) <= 128) return trimmed;
+  return `msg-${createHash("sha256").update(trimmed || "missing").digest("hex").slice(0, 24)}`;
+}
+
+export function snapshotFromAssistantText(
+  sessionId: string,
+  entryId: string,
+  text: string,
+): MessageSnapshot {
+  const normalized = text.replace(/\r\n?/g, "\n");
+  if (!normalized.trim()) {
+    throw new SnapshotError("No non-empty assistant message was found.");
+  }
+  const bytes = Buffer.byteLength(normalized);
+  if (bytes > MAX_SNAPSHOT_BYTES) {
+    throw new SnapshotError(`The latest assistant message is larger than ${MAX_SNAPSHOT_BYTES} bytes.`);
+  }
+  const lines = normalized.split("\n");
+  if (lines.length > MAX_SNAPSHOT_LINES) {
+    throw new SnapshotError(`The latest assistant message has more than ${MAX_SNAPSHOT_LINES} lines.`);
+  }
+  const safeEntryId = sanitizeSnapshotEntryId(entryId);
+  const messageHash = createHash("sha256").update(normalized).digest("hex");
+  const snapshotId = createHash("sha256")
+    .update(sessionId)
+    .update("\0")
+    .update(safeEntryId)
+    .update("\0")
+    .update(messageHash)
+    .digest("hex");
+  return Object.freeze({
+    kind: "message",
+    sessionId,
+    entryId: safeEntryId,
+    snapshotId,
+    messageHash,
+    text: normalized,
+    lines: Object.freeze(lines),
+  });
 }
 
 export function captureLatestAssistantSnapshot(
@@ -52,31 +97,7 @@ export function captureLatestAssistantSnapshot(
     if (typeof entry.id !== "string" || !entry.id) {
       throw new SnapshotError("The latest non-empty assistant message has no valid Pi entry ID.");
     }
-    const bytes = Buffer.byteLength(text);
-    if (bytes > MAX_SNAPSHOT_BYTES) {
-      throw new SnapshotError(`The latest assistant message is larger than ${MAX_SNAPSHOT_BYTES} bytes.`);
-    }
-    const lines = text.split("\n");
-    if (lines.length > MAX_SNAPSHOT_LINES) {
-      throw new SnapshotError(`The latest assistant message has more than ${MAX_SNAPSHOT_LINES} lines.`);
-    }
-    const messageHash = createHash("sha256").update(text).digest("hex");
-    const snapshotId = createHash("sha256")
-      .update(sessionId)
-      .update("\0")
-      .update(entry.id)
-      .update("\0")
-      .update(messageHash)
-      .digest("hex");
-    return Object.freeze({
-      kind: "message",
-      sessionId,
-      entryId: entry.id,
-      snapshotId,
-      messageHash,
-      text,
-      lines: Object.freeze(lines),
-    });
+    return snapshotFromAssistantText(sessionId, entry.id, text);
   }
   throw new SnapshotError("No non-empty assistant message was found on the active session branch.");
 }

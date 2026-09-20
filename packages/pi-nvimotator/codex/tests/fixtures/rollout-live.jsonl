@@ -1,0 +1,14 @@
+{"timestamp":"2026-06-04T10:00:00.000Z","type":"session_meta","payload":{"id":"0196f8a2-aaaa-bbbb-cccc-1234567890ab","cwd":"/work/demo","model_provider":"openai"}}
+{"timestamp":"2026-06-04T10:00:01.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}
+{"timestamp":"2026-06-04T10:00:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Hello"}]}}
+{"timestamp":"2026-06-04T10:00:03.000Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"System instructions"}]}}
+{"timestamp":"2026-06-04T10:00:04.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Older answer"}]}}
+{"timestamp":"2026-06-04T10:00:05.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}
+{"timestamp":"2026-06-04T10:00:06.000Z","type":"turn_context","payload":{"cwd":"/work/demo","model":"o3"}}
+{"timestamp":"2026-06-04T10:00:07.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-2"}}
+{"timestamp":"2026-06-04T10:00:08.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Fix the bug"}]}}
+{"timestamp":"2026-06-04T10:00:09.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Let me look into that."}]}}
+{"timestamp":"2026-06-04T10:00:10.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"ls\"}","call_id":"call_123"}}
+{"timestamp":"2026-06-04T10:00:11.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_123","output":"file1.ts"}}
+{"timestamp":"2026-06-04T10:00:12.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Latest rendered"},{"type":"output_text","text":"second line"}]}}
+{"timestamp":"2026-06-04T10:00:13.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-2"}}

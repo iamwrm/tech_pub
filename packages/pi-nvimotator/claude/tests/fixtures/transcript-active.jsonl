@@ -1,0 +1,4 @@
+{"type":"user","uuid":"u1","parentUuid":null,"timestamp":"2026-08-01T00:00:00.000Z","sessionId":"sess-active","cwd":"/work/demo","message":{"role":"user","content":"Write a greeting"}}
+{"type":"assistant","uuid":"a1","parentUuid":"u1","timestamp":"2026-08-01T00:00:01.000Z","sessionId":"sess-active","message":{"id":"msg_final","role":"assistant","content":[{"type":"text","text":"Substantive final answer"}]}}
+{"type":"user","uuid":"u2","parentUuid":"a1","timestamp":"2026-08-01T00:00:02.000Z","sessionId":"sess-active","message":{"role":"user","content":"<command-name>/nvim-last</command-name>\n<command-message>nvim-last</command-message>\n<command-args></command-args>"}}
+{"type":"assistant","uuid":"a2","parentUuid":"u2","timestamp":"2026-08-01T00:00:03.000Z","sessionId":"sess-active","message":{"id":"msg_stub","role":"assistant","content":[{"type":"text","text":"I'll open nvimotator on my last response."}]}}

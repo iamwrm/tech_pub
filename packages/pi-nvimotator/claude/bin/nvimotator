@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+HOST="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PACKAGE="$(cd "$HOST/.." && pwd)"
+CLI="$HOST/cli.bundle.js"
+if [[ ! -f "$CLI" ]]; then
+  echo "nvimotator CLI is not built. From $PACKAGE run: npm ci && npm run build" >&2
+  exit 1
+fi
+exec node "$CLI" "$@"

@@ -1,0 +1,2 @@
+{"type":"user","uuid":"u1","parentUuid":null,"timestamp":"2026-08-01T00:00:00.000Z","sessionId":"sess-stale","cwd":"/work/demo","message":{"role":"user","content":"old session"}}
+{"type":"assistant","uuid":"a1","parentUuid":"u1","timestamp":"2026-08-01T00:00:01.000Z","sessionId":"sess-stale","message":{"id":"msg_stale","role":"assistant","content":[{"type":"text","text":"Stale assistant text"}]}}

@@ -11,5 +11,13 @@
     "forceConsistentCasingInFileNames": true,
     "allowImportingTsExtensions": true
   },
-  "include": ["index.ts", "src/**/*.ts", "tests/**/*.ts"]
+  "include": [
+    "index.ts",
+    "src/**/*.ts",
+    "tests/**/*.ts",
+    "claude/src/**/*.ts",
+    "claude/tests/**/*.ts",
+    "codex/src/**/*.ts",
+    "codex/tests/**/*.ts"
+  ]
 }

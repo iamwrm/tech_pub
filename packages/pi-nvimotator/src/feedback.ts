@@ -1,9 +1,4 @@
 import { TextDecoder } from "node:util";
-import { loadConfig } from "@plannotator/pi-extension/generated/config.ts";
-import {
-  getAnnotateFileFeedbackPrompt,
-  getAnnotateMessageFeedbackPrompt,
-} from "@plannotator/pi-extension/generated/prompts.ts";
 import type { MessageSnapshot } from "./assistant-message.ts";
 import {
   MAX_EXCERPT_BYTES,
@@ -147,37 +142,33 @@ export function buildRawFeedback(snapshot: MessageSnapshot, annotations: readonl
 
 export type FeedbackWrapper = (feedback: string) => string;
 
-export function plannotatorMessageWrapper(feedback: string): string {
-  return getAnnotateMessageFeedbackPrompt("pi", loadConfig(), { feedback });
-}
+const INCORPORATE = "Incorporate the comments and quick actions below into your next reply.";
 
-export function plannotatorFileWrapper(filePath: string, fileHeader = "File"): FeedbackWrapper {
-  return (feedback) => getAnnotateFileFeedbackPrompt("pi", loadConfig(), {
+function wrapFeedback(target: string, feedback: string): string {
+  return [
+    `This is user annotation feedback from Neovim on ${target}.`,
+    INCORPORATE,
+    "",
     feedback,
-    filePath,
-    fileHeader,
-  });
+  ].join("\n");
 }
 
-export function defaultWrapperFor(snapshot: MessageSnapshot): FeedbackWrapper {
+export function wrapperFor(snapshot: MessageSnapshot): FeedbackWrapper {
   if (isFileSnapshot(snapshot) && snapshot.filePath) {
-    return plannotatorFileWrapper(snapshot.filePath);
+    const filePath = snapshot.filePath;
+    return (feedback) => wrapFeedback(`the local file \`${filePath}\``, feedback);
   }
-  return plannotatorMessageWrapper;
+  return (feedback) => wrapFeedback("the last assistant message", feedback);
 }
 
 export function buildWrappedFeedback(
   snapshot: MessageSnapshot,
   annotations: readonly Annotation[],
-  wrapper: FeedbackWrapper = defaultWrapperFor(snapshot),
+  wrapper: FeedbackWrapper = wrapperFor(snapshot),
 ): string {
   const prompt = wrapper(buildRawFeedback(snapshot, annotations));
   if (Buffer.byteLength(prompt) > MAX_PROMPT_BYTES) {
     throw new FeedbackError(`Rendered feedback is larger than ${MAX_PROMPT_BYTES} bytes.`);
   }
   return prompt;
-}
-
-export function getQuickActions(): typeof QUICK_ACTIONS {
-  return QUICK_ACTIONS;
 }

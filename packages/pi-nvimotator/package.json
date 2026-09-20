@@ -1,7 +1,7 @@
 {
   "name": "pi-nvimotator",
-  "version": "0.3.4",
-  "description": "Pi extension and Neovim plugin for annotating the latest assistant message or a local file from any same-host shell.",
+  "version": "0.4.0",
+  "description": "Pi extension and Neovim plugin for annotating the latest assistant message or a local file from any same-host shell. Claude Code and Codex hosts live in claude/ and codex/ and are not Pi extensions.",
   "private": true,
   "type": "module",
   "keywords": [
@@ -17,8 +17,8 @@
     "src",
     "plugin",
     "lua",
-    "doc",
-    "tests",
+    "claude",
+    "codex",
     "README.md",
     "Changelog.md",
     "LICENSE",
@@ -26,10 +26,15 @@
   ],
   "scripts": {
     "check": "tsc --noEmit",
-    "test:ts": "tsx --test tests/*.test.ts",
+    "build:claude": "esbuild claude/src/cli.ts --bundle --platform=node --format=esm --minify --outfile=claude/cli.bundle.js --legal-comments=none",
+    "build:codex": "esbuild codex/src/cli.ts --bundle --platform=node --format=esm --minify --outfile=codex/cli.bundle.js --legal-comments=none",
+    "build": "npm run build:claude && npm run build:codex",
+    "test:ts": "tsx --test --test-concurrency=1 tests/*.test.ts claude/tests/cli.test.ts claude/tests/plugin.test.ts claude/tests/claude-session.test.ts codex/tests/cli.test.ts codex/tests/plugin.test.ts codex/tests/codex-session.test.ts",
     "test:nvim": "bash tests/nvim-headless.sh",
-    "test": "npm run check && npm run test:ts && npm run test:nvim",
-    "test:e2e": "bash tests/tmux-e2e.sh"
+    "test:bundle": "tsx --test --test-concurrency=1 claude/tests/bundle.test.ts codex/tests/bundle.test.ts",
+    "test": "npm run check && npm run test:ts && npm run test:nvim && npm run build && node claude/cli.bundle.js --help >/dev/null && node codex/cli.bundle.js --help >/dev/null && npm run test:bundle",
+    "test:e2e": "bash tests/tmux-e2e.sh",
+    "install-codex-skills": "bash codex/scripts/install-skills.sh"
   },
   "pi": {
     "extensions": [
@@ -40,17 +45,15 @@
   "engines": {
     "node": ">=22.19.0"
   },
-  "dependencies": {
-    "@plannotator/pi-extension": "0.27.8"
-  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "^0.84.3",
     "@earendil-works/pi-coding-agent": "^0.84.3",
-    "@types/node": "^24.0.0",
-    "tsx": "latest",
-    "typescript": "latest"
+    "@types/node": "^24.13.3",
+    "esbuild": "^0.25.12",
+    "tsx": "4.23.12",
+    "typescript": "^5.9.0"
   }
 }

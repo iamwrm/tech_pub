@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { captureLatestAssistantSnapshot, MAX_SNAPSHOT_BYTES, SnapshotError } from "../src/assistant-message.ts";
-import { buildRawFeedback, buildWrappedFeedback, excerptForAnchor, FeedbackError } from "../src/feedback.ts";
+import {
+  captureLatestAssistantSnapshot,
+  MAX_SNAPSHOT_BYTES,
+  SnapshotError,
+  snapshotFromAssistantText,
+} from "../src/assistant-message.ts";
+import { buildRawFeedback, buildWrappedFeedback, excerptForAnchor, FeedbackError, wrapperFor } from "../src/feedback.ts";
 import { parseRequest, PROTOCOL_VERSION, QUICK_ACTIONS, type Annotation } from "../src/protocol.ts";
 import { SubmissionError, SubmissionStore } from "../src/submission.ts";
 
@@ -32,6 +37,15 @@ const annotations: Annotation[] = [
   },
   { id: "a3", kind: "comment", comment: "General note" },
 ];
+
+test("snapshotFromAssistantText sanitizes unusable entry IDs and rejects empty text", () => {
+  const value = snapshotFromAssistantText("session-1", "msg_01Ab", "hello\r\nworld");
+  assert.equal(value.text, "hello\nworld");
+  assert.equal(value.entryId, "msg_01Ab");
+  const hashed = snapshotFromAssistantText("session-1", "not a valid id!", "hello");
+  assert.match(hashed.entryId, /^msg-[0-9a-f]{24}$/);
+  assert.throws(() => snapshotFromAssistantText("session-1", "id", "  \n"), SnapshotError);
+});
 
 test("assistant extraction uses the latest assistant text blocks and normalizes CRLF", () => {
   const value = snapshot();
@@ -140,39 +154,33 @@ test("default wrappers keep last-message and file annotation distinct", async ()
   const { join } = await import("node:path");
   const { captureFileSnapshot } = await import("../src/file-snapshot.ts");
   const root = await mkdtemp(join(tmpdir(), "pi-nvimotator-wrap-"));
-  const previous = process.env.PLANNOTATOR_DATA_DIR;
-  process.env.PLANNOTATOR_DATA_DIR = root;
   try {
     const message = buildWrappedFeedback(snapshot(), annotations);
-    assert.match(message, /# Message Annotations/);
+    assert.match(message, /last assistant message/);
+    assert.match(message, /Incorporate the comments and quick actions/);
     assert.match(message, /# Message Feedback/);
     assert.match(message, /Assistant entry: `entry-1`/);
     assert.match(message, /Selected assistant text:/);
-    assert.doesNotMatch(message, /# Markdown Annotations/);
+    assert.doesNotMatch(message, /the local file/);
     assert.doesNotMatch(message, /# File Feedback/);
 
-    await writeFile(join(root, "config.json"), JSON.stringify({
-      prompts: {
-        annotate: {
-          fileFeedback: "CUSTOM-FILE {{fileHeader}} {{filePath}}\n{{feedback}}\nCUSTOM-FILE-END",
-        },
-      },
-    }));
     const path = join(root, "notes.md");
     await writeFile(path, "alpha\nemoji 🙂 line\nomega");
     const fileSnapshot = await captureFileSnapshot(path, "session-1");
     const filePrompt = buildWrappedFeedback(fileSnapshot, annotations);
-    assert.match(filePrompt, /CUSTOM-FILE File /);
+    assert.match(filePrompt, /the local file/);
     assert.ok(filePrompt.includes(path), "wrapped file prompt includes the file path");
     assert.match(filePrompt, /# File Feedback/);
     assert.match(filePrompt, /Selected file text:/);
-    assert.match(filePrompt, /CUSTOM-FILE-END/);
-    assert.doesNotMatch(filePrompt, /# Message Annotations/);
+    assert.doesNotMatch(filePrompt, /last assistant message/);
     assert.doesNotMatch(filePrompt, /Assistant entry:/);
     assert.doesNotMatch(filePrompt, /Selected assistant text:/);
+
+    assert.match(wrapperFor(snapshot())("raw-feedback"), /last assistant message/);
+    assert.match(wrapperFor(fileSnapshot)("raw-feedback"), /the local file/);
   } finally {
-    if (previous === undefined) delete process.env.PLANNOTATOR_DATA_DIR;
-    else process.env.PLANNOTATOR_DATA_DIR = previous;
+    const { rm } = await import("node:fs/promises");
+    await rm(root, { recursive: true, force: true });
   }
 });
 
@@ -197,6 +205,7 @@ test("protocol parser rejects unknown fields, duplicate IDs, and malformed ancho
     snapshotId: "snapshot-1",
   };
   assert.equal(parseRequest({ ...base, type: "ping" }).ok, true);
+  assert.equal(parseRequest({ ...base, type: "cancel" }).ok, false);
   assert.equal(parseRequest({ ...base, type: "ping", extra: true }).ok, false);
   assert.equal(parseRequest({ ...base, type: "render", submissionId: "submission-1", annotations: [annotations[0], annotations[0]] }).ok, false);
   assert.equal(parseRequest({ ...base, type: "render", submissionId: "submission-1", annotations: [{
