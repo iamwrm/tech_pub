@@ -6,16 +6,45 @@ queued draft.
 
 ## Install
 
-This package uses the native `better-sqlite3` runtime dependency. For the
-path-installed checkout in this repository:
+This package uses the native `better-sqlite3` runtime dependency. Register the
+local checkout directly:
 
 ```bash
-npm --prefix ./packages/pi-prompt-magazine install
 pi install ./packages/pi-prompt-magazine
 ```
 
-Prebuilt native binaries are supported on Linux, macOS, and Windows on x64 or
-arm64. Other platforms are rejected by the package metadata.
+On the first persisted session startup (including `/reload`), the extension
+automatically installs missing dependencies, then opens SQLite without another
+restart. Pi's local-path installer itself still only registers the path.
+`--no-session` stays in memory and never installs dependencies.
+
+The bootstrap runs `npm install --omit=dev --no-audit --no-fund --save=false`
+**in the extension directory**, using npm on PATH. It reads the existing lockfile
+when present without saving manifest/lockfile changes. This production install
+may prune local dev dependencies; run `npm ci` before development/testing.
+It can download packages/native binaries and execute dependency build scripts
+with your account's permissions. npm must be available and the directory writable.
+Prebuilt binaries depend on Node/platform availability; otherwise Python and a
+C++ build toolchain may be required. Package metadata admits Linux/macOS/Windows
+on x64/arm64.
+
+Set `PI_PROMPT_MAGAZINE_AUTO_INSTALL=0` before starting Pi to disable automatic
+installation (recommended for offline or externally managed deployments).
+You can instead run `npm --prefix ./packages/pi-prompt-magazine ci` yourself.
+
+Installation output is captured, not written over the TUI; errors include a
+bounded diagnostic tail. npm has a three-minute timeout and is cancelled during
+session teardown. A package-local `.pi-magazine-install.lock/` serializes Pi
+installers; lock waits time out after 185 seconds. Crashed-process locks are not
+automatically stolen: verify no installation is running before removing a stale
+lock directory. This lock does not coordinate manual npm commands.
+
+Existing but broken native/transitive dependencies and database errors do **not**
+trigger automatic reinstalls. Repair those explicitly (for a Node ABI change,
+try `npm rebuild better-sqlite3` in the package directory), then `/reload`.
+While initialization is pending or failed, interactive `;;` drafts remain
+handled and restored to the editor rather than sent to the model. The bootstrap
+never deletes or resets the magazine database.
 
 Start a new session or run `/reload`. Remove with:
 
@@ -138,7 +167,7 @@ never recover an entry you do not recognize.
   cannot access Pi's built-in editor paste snapshots.
 - Pi's built-in Ctrl+S stash remains a separate single-slot stash.
 - Database rows are not automatically deleted when old Pi sessions are removed;
-  clear or recover sensitive drafts deliberately.
+  clear or recover sensitive drafts explicitly.
 
 ## Development
 

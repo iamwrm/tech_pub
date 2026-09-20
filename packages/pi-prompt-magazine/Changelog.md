@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.0] - 2026-09-16
+
+- Shorten lifecycle documentation and correct the stale bare-marker comment.
+- Bootstrap missing `better-sqlite3` dependencies on persisted-session startup:
+  asynchronous production npm installation, same-process SQLite initialization,
+  and `PI_PROMPT_MAGAZINE_AUTO_INSTALL=0` opt-out. Ephemeral sessions skip npm.
+- Serialize installers with a package-local cross-process lock; bound npm output
+  and runtime, cancel on teardown, and preserve stash-intent drafts on failure.
+  Native ABI, transitive dependency, and database errors never trigger reinstall.
+- Add dependency/runner/concurrency and pending/failure/shutdown lifecycle tests.
+
 ## [0.3.1] - 2026-08-15
 
 - Rename the order-mode **Enter drop** hint to **Enter release** so it cannot

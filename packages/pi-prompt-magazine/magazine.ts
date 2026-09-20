@@ -1,21 +1,7 @@
 /**
- * pi-prompt-magazine — pure queue model for the prompt "magazine".
- *
- * No pi imports here on purpose: the model is unit-testable with plain Node,
- * and the extension layer (index.ts) only adapts it to the pi API.
- *
- * Semantics:
- *   - FIFO queue of stashed drafts. Stashing pushes to the back; restore pops
- *     the selected draft (front for the unload shortcut flows).
- *   - Hard capacity (MAGAZINE_MAX); pushing past the cap drops the oldest
- *     draft so the stash flow is never blocked.
- *   - Entries are immutable snapshots: every mutation returns a new state.
- *
- * Capture marker (parseStashIntent): a submitted draft whose trailing
- * whitespace is followed by `;;` is intercepted and stashed instead of sent.
- * `;;;` escapes to a literal `;;`-terminated send. A bare `;;` (nothing left
- * after stripping) is ignored.
- *
+ * Immutable FIFO drafts, capped at MAGAZINE_MAX with oldest-first eviction.
+ * Pi input and UI handling live in index.ts. Trailing `;;` stashes a draft,
+ * bare `;;` opens the browser, and `;;;` sends a literal trailing `;;`.
  */
 
 export interface StashEntry {
@@ -105,18 +91,7 @@ export type StashIntent =
   | { kind: "open" }
   | { kind: "none" };
 
-/**
- * Decide what a submitted draft means.
- *
- * - ends with `;;;`            -> "send": strip one semicolon, send normally
- *                                  (escape hatch for drafts ending in `;;`)
- * - ends with `;;` (non-empty) -> "stash": strip the marker, intercept
- * - bare `;;`                  -> "open": open the magazine browser
- * - anything else              -> "none": normal submission
- *
- * The marker must sit at the very end of the draft (after trailing
- * whitespace); a `;;` in the middle of a multi-line draft is left alone.
- */
+/** Parse only a trailing marker; preserve markers inside the draft. */
 export function parseStashIntent(text: string): StashIntent {
   const trimmed = text.trimEnd();
   if (trimmed.endsWith(`${STASH_MARKER};`)) {

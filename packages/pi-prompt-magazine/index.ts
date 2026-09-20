@@ -40,6 +40,7 @@ import {
   type StoredMagazine,
 } from "./storage.ts";
 import { MagazineOrderMode } from "./order-mode.ts";
+import { ensureDatabaseDependency, type DependencyOptions } from "./dependencies.ts";
 
 const WIDGET_KEY = "pi-prompt-magazine";
 const WIDGET_MAX_ROWS = 8;
@@ -51,6 +52,8 @@ export interface PromptMagazineOptions {
   databasePath?: string;
   /** Set to zero to disable cross-process widget polling. */
   refreshIntervalMs?: number;
+  /** Dependency preparation override for isolated lifecycle tests. */
+  prepareDependency?: (options: DependencyOptions) => Promise<void>;
 }
 
 interface AppliedMutation<T> {
@@ -102,6 +105,8 @@ export function activatePromptMagazine(pi: ExtensionAPI, options: PromptMagazine
   let ephemeral = false;
   let refreshTimer: ReturnType<typeof setInterval> | undefined;
   let refreshGeneration = 0;
+  let initialization: AbortController | undefined;
+  let dependencyTask: Promise<void> | undefined;
 
   const databasePath = options.databasePath ?? join(getAgentDir(), MAGAZINE_DATABASE_FILENAME);
   const refreshIntervalMs = Math.max(0, options.refreshIntervalMs ?? DEFAULT_REFRESH_INTERVAL_MS);
@@ -271,6 +276,9 @@ export function activatePromptMagazine(pi: ExtensionAPI, options: PromptMagazine
   }
 
   pi.on("session_start", async (event, ctx) => {
+    initialization?.abort();
+    const controller = new AbortController();
+    initialization = controller;
     closeStorage();
     state = createMagazineState();
     revision = -1;
@@ -290,6 +298,14 @@ export function activatePromptMagazine(pi: ExtensionAPI, options: PromptMagazine
     }
 
     try {
+      dependencyTask = (options.prepareDependency ?? ensureDatabaseDependency)({
+        signal: controller.signal,
+        onProgress: (message) => {
+          if (!controller.signal.aborted) safeNotify(ctx, message, "info");
+        },
+      });
+      await dependencyTask;
+      if (controller.signal.aborted || initialization !== controller) return;
       storage = new MagazineStorage(databasePath);
       const loaded = storage.loadOrCreate(identity, {
         cloneFromSessionFile: forkSourceFile(event, ctx),
@@ -297,6 +313,7 @@ export function activatePromptMagazine(pi: ExtensionAPI, options: PromptMagazine
       applyStoredBestEffort(loaded, ctx);
       startRefreshPolling(ctx);
     } catch (error) {
+      if (controller.signal.aborted || initialization !== controller) return;
       try {
         storage?.close();
       } catch {
@@ -314,6 +331,11 @@ export function activatePromptMagazine(pi: ExtensionAPI, options: PromptMagazine
   });
 
   pi.on("session_shutdown", async (event, ctx) => {
+    initialization?.abort();
+    initialization = undefined;
+    // Wait until npm and its lock have been torn down before reloading.
+    await dependencyTask?.catch(() => {});
+    dependencyTask = undefined;
     if (ephemeral && identity) {
       const handoffs = ephemeralHandoffs();
       if (event.reason === "reload") {

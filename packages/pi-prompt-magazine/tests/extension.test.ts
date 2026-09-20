@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { activatePromptMagazine } from "../index.ts";
+import { activatePromptMagazine, type PromptMagazineOptions } from "../index.ts";
 import { pushStash } from "../magazine.ts";
 import Database from "better-sqlite3";
 import { MagazineStorage } from "../storage.ts";
@@ -44,7 +44,7 @@ interface Harness {
   command: (name: string, args?: string) => Promise<void>;
 }
 
-function makeHarness(session: FakeSession, databasePath: string, refreshIntervalMs = 0): Harness {
+function makeHarness(session: FakeSession, databasePath: string, refreshIntervalMs = 0, options: PromptMagazineOptions = {}): Harness {
   const handlers = new Map<string, Handler[]>();
   const commands = new Map<string, Command>();
   const appended: Array<{ customType: string; data: unknown }> = [];
@@ -129,7 +129,7 @@ function makeHarness(session: FakeSession, databasePath: string, refreshInterval
     },
   } as unknown as ExtensionContext;
 
-  activatePromptMagazine(pi, { databasePath, refreshIntervalMs });
+  activatePromptMagazine(pi, { databasePath, refreshIntervalMs, ...options });
 
   return {
     handlers,
@@ -662,4 +662,72 @@ test("revision polling self-defuses after a stale UI throws", async () => {
   } finally {
     f.cleanup();
   }
+});
+
+test("pending dependency initialization preserves drafts and enables storage without restart", async () => {
+  const f = fixture();
+  let ready!: () => void;
+  const gate = new Promise<void>((resolve) => { ready = resolve; });
+  const harness = makeHarness({ id: "bootstrap", cwd: f.dir, branch: [] }, f.databasePath, 0, {
+    prepareDependency: async () => gate,
+  });
+  try {
+    const startup = harness.emit("session_start", { reason: "startup" });
+    const [result] = await harness.emit("input", { source: "interactive", text: "keep during install;;" });
+    assert.deepEqual(result, { action: "handled" });
+    assert.equal(harness.ui.editorText, "keep during install;;");
+    assert.equal(existsSync(f.databasePath), false);
+    ready();
+    await startup;
+    await harness.command("stash", "after install");
+    assert.match(widgetText(harness), /after install/);
+    await harness.emit("session_shutdown");
+  } finally { ready(); f.cleanup(); }
+});
+
+test("failed dependency installation leaves capture fail-safe", async () => {
+  const f = fixture();
+  try {
+    const harness = makeHarness({ id: "install-failure", cwd: f.dir, branch: [] }, f.databasePath, 0, {
+      prepareDependency: async () => { throw new Error("npm is offline"); },
+    });
+    await harness.emit("session_start", { reason: "startup" });
+    assert.ok(harness.ui.notifications.some(({ message }) => message.includes("npm is offline")));
+    const [result] = await harness.emit("input", { source: "interactive", text: "safe;;" });
+    assert.deepEqual(result, { action: "handled" });
+    assert.equal(harness.ui.editorText, "safe;;");
+    assert.equal(existsSync(f.databasePath), false);
+    await harness.emit("session_shutdown");
+  } finally { f.cleanup(); }
+});
+
+test("shutdown cancels initialization and prevents late database creation", async () => {
+  const f = fixture();
+  let cancelled = false;
+  try {
+    const harness = makeHarness({ id: "install-shutdown", cwd: f.dir, branch: [] }, f.databasePath, 0, {
+      prepareDependency: async ({ signal }) => new Promise<void>((resolve) => {
+        signal!.addEventListener("abort", () => { cancelled = true; resolve(); }, { once: true });
+      }),
+    });
+    const startup = harness.emit("session_start", { reason: "startup" });
+    await harness.emit("session_shutdown");
+    await startup;
+    assert.equal(cancelled, true);
+    assert.equal(existsSync(f.databasePath), false);
+  } finally { f.cleanup(); }
+});
+
+test("ephemeral sessions never prepare native dependencies", async () => {
+  const f = fixture();
+  try {
+    const harness = makeHarness({ id: "no-native", cwd: f.dir, branch: [], persisted: false }, f.databasePath, 0, {
+      prepareDependency: async () => { assert.fail("ephemeral sessions must not run npm"); },
+    });
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.command("stash", "memory");
+    assert.match(widgetText(harness), /memory/);
+    assert.equal(existsSync(f.databasePath), false);
+    await harness.emit("session_shutdown");
+  } finally { f.cleanup(); }
 });
