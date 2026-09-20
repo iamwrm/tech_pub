@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-09-20
+
+### Changed
+- Updated the pi coding-agent development dependency and lockfile to 0.85.1.
+
+### Validated
+- Pi 0.85.1 keeps the compaction/session entry contracts, `session_compact` timing, label API, and `/tree` marker rendering used by this extension unchanged; strict typecheck passes without a source migration.
+- A real `pi` 0.85.1 run with this extension loaded wrote `compaction 1` and `compaction 1 — kept from here (~9k)` on a copied session, and a second run wrote no labels.
+
 ## 2026-08-14
 
 ### Changed
