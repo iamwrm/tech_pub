@@ -1,7 +1,7 @@
 {
   "name": "pi-unified-edit",
-  "version": "0.3.0",
-  "description": "Atomic multi-file pi edit extension with patch, rows, code, pi-JSON, and OMP-compatible hash-line modes.",
+  "version": "0.4.2",
+  "description": "Atomic multi-file Pi edit extension with OMP-compatible hash-line edits.",
   "private": true,
   "type": "module",
   "keywords": [
@@ -9,14 +9,11 @@
     "pi",
     "extension",
     "edit",
-    "patch",
     "hashline"
   ],
   "files": [
     "unified-edit.ts",
     "hash-edit.ts",
-    "tests",
-    "scripts/*.py",
     "README.md",
     "Changelog.md",
     "LICENSE",
@@ -24,7 +21,7 @@
   ],
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "npm run check && tsx --test tests/*.test.ts"
+    "test": "npm run check && tsx --test edit.test.ts"
   },
   "pi": {
     "extensions": [

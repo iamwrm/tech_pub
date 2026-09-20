@@ -15,6 +15,7 @@
   },
   "include": [
     "unified-edit.ts",
-    "tests/**/*.ts"
+    "hash-edit.ts",
+    "edit.test.ts"
   ]
 }

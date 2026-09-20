@@ -2,7 +2,7 @@
 
 ## oh-my-pi hashline format
 
-The `hash` mode's model-facing notation and explicit-line operation vocabulary
+The hash notation and explicit-line operation vocabulary
 (`[path#TAG]`, numbered read rows, `PUT`, `CUT`, `REM`, and `MV`) are adapted
 from the hashline tool in [oh-my-pi](https://github.com/can1357/oh-my-pi),
 reviewed at commit `ffd53ff92a6f575d499730475a73460dd7cc2eea` (v17.3.4,

@@ -1,12 +1,6 @@
 /*
- * Hash-line edit mode for pi-unified-edit.
- *
- * The wire format and read notation are compatible with the explicit-line
- * core of oh-my-pi's hashline tool (PUT/CUT/REM/MV and [path#TAG] anchors).
- * This is a Node-native implementation that feeds pi-unified-edit's stronger
- * transaction-wide planner; it does not copy OMP's Bun/tree-sitter engine.
- * See THIRD_PARTY_NOTICES.md for attribution and the intentionally unsupported
- * syntax-aware block/register extensions.
+ * Hash-line planner: OMP-compatible PUT/CUT/REM/MV and [path#TAG] snapshots.
+ * Node-native; no tree-sitter N* blocks or registers. See THIRD_PARTY_NOTICES.md.
  */
 
 import { isUtf8 } from "node:buffer";
@@ -18,7 +12,7 @@ const HASH_SNAPSHOT_LIMIT_BYTES = 32 * 1024 * 1024;
 const HASH_HISTORY_DEPTH = 4;
 
 export type HashFileChange = {
-	kind: "update" | "write" | "add" | "delete";
+	kind: "update" | "add" | "delete";
 	path: string;
 	absolutePath: string;
 	oldText: string;
@@ -45,10 +39,9 @@ type HashSection = {
 	headerLine: number;
 };
 
-type HashReadEvent = ToolResultEvent;
-type HashReadResult = { content: ToolResultEvent["content"] };
+type HashReadResult = Pick<ToolResultEvent, "content">;
 
-function normalizeToLF(text: string): string {
+export function normalizeToLF(text: string): string {
 	return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
 
@@ -57,9 +50,7 @@ function stripBom(text: string): string {
 }
 
 function normalizeHashInput(text: string): string {
-	// OMP hashes normalized line endings after ignoring horizontal trailing
-	// whitespace. Keeping this exact property means tags survive harmless
-	// trailing-space differences while the stored snapshot still guards drift.
+	// OMP tags ignore horizontal trailing whitespace after LF-normalization.
 	return normalizeToLF(text).replace(/[ \t]+(?=\n|$)/g, "");
 }
 
@@ -179,10 +170,6 @@ function parseRange(raw: string, op: "PUT" | "CUT", sourceLine: number): { start
 	return { start, end };
 }
 
-function operationStart(raw: string): boolean {
-	return /^(?:PUT|CUT|REM|MV)(?:\s|$)/.test(raw.trim());
-}
-
 export function parseHashPayload(payload: string): HashSection[] {
 	const lines = normalizeToLF(payload).split("\n");
 	const sections: HashSection[] = [];
@@ -229,16 +216,9 @@ export function parseHashPayload(payload: string): HashSection[] {
 			if (anchor === ">$" || anchor === "$") {
 				current.operations.push({ kind: "putAt", gap: "eof", rows, sourceLine: lineNo });
 			} else if (/^[<>]\d+$/.test(anchor)) {
-				current.operations.push({
-					kind: "putAt",
-					gap: anchor[0] === "<" ? "before" : "after",
-					line: Number(anchor.slice(1)),
-					rows,
-					sourceLine: lineNo,
-				});
+				current.operations.push({ kind: "putAt", gap: anchor[0] === "<" ? "before" : "after", line: Number(anchor.slice(1)), rows, sourceLine: lineNo });
 			} else {
-				const range = parseRange(anchor, "PUT", lineNo);
-				current.operations.push({ kind: "putRange", ...range, rows, sourceLine: lineNo });
+				current.operations.push({ kind: "putRange", ...parseRange(anchor, "PUT", lineNo), rows, sourceLine: lineNo });
 			}
 			continue;
 		}
@@ -261,7 +241,7 @@ export function parseHashPayload(payload: string): HashSection[] {
 		if (raw.startsWith("+")) {
 			throw new Error(`Hash mode line ${lineNo}: stray +content row without a preceding PUT.`);
 		}
-		if (operationStart(raw)) {
+		if (/^(?:PUT|CUT|REM|MV)(?:\s|$)/.test(trimmed)) {
 			throw new Error(`Hash mode line ${lineNo}: unsupported operation '${trimmed}'.`);
 		}
 		throw new Error(`Hash mode line ${lineNo}: expected PUT, CUT, REM, MV, or a [path#TAG] header.`);
@@ -309,12 +289,7 @@ export function applyHashOperations(path: string, text: string, operations: Hash
 			if (snapshot) {
 				for (let line = op.start; line <= op.end; line++) assertLineSeen(snapshot, line, path, op.sourceLine);
 			}
-			ranges.push({
-				start: op.start,
-				end: op.end,
-				rows: op.kind === "putRange" ? op.rows : [],
-				sourceLine: op.sourceLine,
-			});
+			ranges.push({ start: op.start, end: op.end, rows: op.kind === "putRange" ? op.rows : [], sourceLine: op.sourceLine });
 			continue;
 		}
 
@@ -459,7 +434,7 @@ function splitReadFooter(text: string): { body: string; footer: string } {
 	return { body: text.slice(0, marker), footer: `\n\n${footer}` };
 }
 
-function noteOnTextContent(event: HashReadEvent, note: string): HashReadResult | undefined {
+function noteOnTextContent(event: ToolResultEvent, note: string): HashReadResult | undefined {
 	let added = false;
 	const content = event.content.map((item) => {
 		if (added || item.type !== "text" || typeof item.text !== "string") return item;
@@ -471,7 +446,7 @@ function noteOnTextContent(event: HashReadEvent, note: string): HashReadResult |
 
 /** Transform a successful built-in read result into OMP-compatible hash lines. */
 export async function formatHashReadResult(
-	event: HashReadEvent,
+	event: ToolResultEvent,
 	cwd: string,
 	store: HashSnapshotStore,
 ): Promise<HashReadResult | undefined> {
@@ -496,9 +471,8 @@ export async function formatHashReadResult(
 	const fullText = normalizeToLF(stripBom(bytes.toString("utf8")));
 	const tag = hashTag(fullText);
 	const firstTextIndex = event.content.findIndex((item) => item.type === "text");
-	if (firstTextIndex < 0) return undefined;
 	const firstText = event.content[firstTextIndex];
-	if (firstText.type !== "text") return undefined;
+	if (firstText?.type !== "text") return undefined;
 	const originalOutput = firstText.text;
 	if (/^\[Line \d+ is .*exceeds .*limit/.test(originalOutput)) {
 		store.record(absolutePath, fullText);
@@ -509,12 +483,8 @@ export async function formatHashReadResult(
 	if (rows.length > 0 && rows[rows.length - 1] === "" && fullText.endsWith("\n")) rows.pop();
 	const rawOffset = typeof input.offset === "number" ? input.offset : 1;
 	const offset = Number.isSafeInteger(rawOffset) && rawOffset > 0 ? rawOffset : 1;
-	const seen: number[] = [];
-	const numbered = rows.map((row, index) => {
-		const line = offset + index;
-		seen.push(line);
-		return `${line}:${row}`;
-	});
+	const seen = rows.map((_, index) => offset + index);
+	const numbered = rows.map((row, index) => `${seen[index]}:${row}`);
 	store.record(absolutePath, fullText, seen);
 	const header = `[${displayedPath(cwd, requested, absolutePath)}#${tag}]`;
 	const transformed = `${header}${numbered.length > 0 ? `\n${numbered.join("\n")}` : ""}${footer}`;
