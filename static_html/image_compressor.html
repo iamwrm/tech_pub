@@ -157,10 +157,13 @@ body.has-images #empty { display: none; }
                     linear-gradient(45deg, var(--checker) 25%, transparent 25%, transparent 75%, var(--checker) 75%);
   background-size: 16px 16px; background-position: 0 0, 8px 8px;
 }
-#stage .wrap { min-width: 100%; min-height: 100%; display: flex; align-items: center; justify-content: center; padding: 16px; }
-#stage.fit .wrap { height: 100%; }
+/* margin:auto centers without pushing an oversized image into unscrollable negative overflow */
+#stage .wrap { display: flex; width: max-content; min-width: 100%; min-height: 100%; padding: 16px; }
+#stage.fit .wrap { width: 100%; height: 100%; }
 #stage.fit img { max-width: 100%; max-height: 100%; object-fit: contain; }
-#stage img { display: block; image-rendering: auto; }
+#stage img { display: block; flex: none; margin: auto; image-rendering: auto; -webkit-user-drag: none; user-select: none; }
+#stage:not(.fit) { cursor: grab; }
+#stage.panning { cursor: grabbing; }
 #stage.px img { image-rendering: pixelated; }
 #badge {
   position: absolute; top: 10px; left: 10px; font-size: 11px; padding: 2px 8px; border-radius: 4px;
@@ -749,7 +752,27 @@ function setZoom(z) {
   state.zoom = z;
   document.querySelectorAll('#zoom button').forEach((b) => b.classList.toggle('on', b.dataset.z === z));
   updatePreview();
+  // start zoomed views centered; the user can scroll or drag to any edge
+  const st = $('#stage');
+  st.scrollLeft = (st.scrollWidth - st.clientWidth) / 2;
+  st.scrollTop = (st.scrollHeight - st.clientHeight) / 2;
 }
+
+// drag to pan when zoomed
+(() => {
+  const st = $('#stage'); let pan = null;
+  st.addEventListener('pointerdown', (e) => {
+    if (state.zoom === 'fit' || e.button !== 0 || e.pointerType === 'touch') return;
+    pan = { x: e.clientX, y: e.clientY, l: st.scrollLeft, t: st.scrollTop };
+    st.setPointerCapture(e.pointerId); st.classList.add('panning'); e.preventDefault();
+  });
+  st.addEventListener('pointermove', (e) => {
+    if (!pan) return;
+    st.scrollLeft = pan.l - (e.clientX - pan.x); st.scrollTop = pan.t - (e.clientY - pan.y);
+  });
+  const end = () => { pan = null; st.classList.remove('panning'); };
+  st.addEventListener('pointerup', end); st.addEventListener('pointercancel', end);
+})();
 
 const cmp = $('#cmp');
 const setCompare = (on) => { if (state.comparing !== on) { state.comparing = on; updatePreview(); } };
