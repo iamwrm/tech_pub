@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>To Better HTML</title>
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>
+  window.MathJax = {
+    svg: { fontCache: 'none' },
+    startup: { typeset: false }
+  };
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-svg-full.js"></script>
+<style>
+  :root {
+    --bg: #f4f3ef; --panel: #ffffff; --fg: #1f2328; --muted: #6b6f76;
+    --border: #d8d6cf; --accent: #2f6fde; --accent-fg: #fff; --ok: #1a7f37; --err: #cf222e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #17181a; --panel: #212226; --fg: #e6e6e6; --muted: #9a9ca3;
+      --border: #3a3b40; --accent: #4c8bf5; --accent-fg: #fff; --ok: #3fb950; --err: #f85149;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  header { padding: 14px 16px 8px; }
+  header h1 { margin: 0; font-size: 18px; }
+  header p { margin: 4px 0 0; color: var(--muted); }
+  .bar { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; padding: 8px 16px; }
+  .bar label { display: inline-flex; gap: 6px; align-items: center; }
+  select, button { font: inherit; color: var(--fg); background: var(--panel);
+                   border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent);
+                   font-weight: 600; padding: 7px 16px; }
+  #status { color: var(--muted); }
+  #status.ok { color: var(--ok); } #status.err { color: var(--err); }
+  .hint { padding: 0 16px; color: var(--muted); font-size: 13px; }
+  main { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 8px 16px 16px; }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+  .pane { display: flex; flex-direction: column; min-width: 0; }
+  .pane h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 6px; }
+  textarea { width: 100%; height: 72vh; resize: vertical; padding: 10px; border-radius: 8px;
+             border: 1px solid var(--border); background: var(--panel); color: var(--fg);
+             font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  /* The preview always looks like a white email body, regardless of theme. */
+  #preview { height: 72vh; overflow: auto; background: #fff; border: 1px solid var(--border);
+             border-radius: 8px; padding: 16px 20px; color-scheme: light; }
+</style>
+</head>
+<body>
+<header>
+  <h1>To Better HTML</h1>
+  <p>Paste a ChatGPT “Copy response” (Markdown + LaTeX). Click <b>Copy rendered</b>, then paste into your email.</p>
+</header>
+
+<div class="bar">
+  <label>Math as
+    <select id="mathMode">
+      <option value="png">Embedded images (offline)</option>
+      <option value="hosted">Hosted images (CodeCogs)</option>
+      <option value="mathml">MathML</option>
+    </select>
+  </label>
+  <label><input type="checkbox" id="dollar" checked> Treat <code>$…$</code> as math</label>
+  <label><input type="checkbox" id="stripUtm" checked> Strip <code>utm_source</code> from links</label>
+  <button id="sample">Load example</button>
+  <button id="copy" class="primary">Copy rendered</button>
+  <span id="status"></span>
+</div>
+<p class="hint" id="modeHint"></p>
+
+<main>
+  <section class="pane">
+    <h2>Input (Markdown)</h2>
+    <textarea id="src" spellcheck="false" placeholder="Paste ChatGPT output here…"></textarea>
+  </section>
+  <section class="pane">
+    <h2>Email preview</h2>
+    <div id="preview"><div id="out"></div></div>
+  </section>
+</main>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const srcEl = $('src'), outEl = $('out'), statusEl = $('status');
+
+  const EM = 16;            // email body font size in px
+  const MATH_SCALE = 1.15; // TeX fonts look small next to sans-serif body text
+  const PNG_SCALE = 3;      // raster resolution multiplier for crisp images on HiDPI
+  const TEXT = '#1f2328';
+  const MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace';
+
+  const MODE_HINTS = {
+    png: 'Math is rasterized into the copied HTML as PNG data. Works in Apple Mail, Outlook desktop and Thunderbird; Gmail web may drop such images — use “Hosted images” there.',
+    hosted: 'Math becomes <img> links to latex.codecogs.com (the formula text is sent to that service). Most compatible, incl. Gmail; recipients need images enabled.',
+    mathml: 'Native MathML: sharp and selectable, but only some clients render it (Apple Mail, Thunderbird). Gmail and Outlook do not.'
+  };
+
+  // ---------- 1. Pull math out of the Markdown so marked doesn't mangle it ----------
+  function protectMath(src, allowDollar) {
+    const maths = [];
+    const re = allowDollar
+      ? /(`+)[\s\S]*?\1|\\\[([\s\S]+?)\\\]|\$\$([\s\S]+?)\$\$|\\\(([\s\S]+?)\\\)|(?<![\\$])\$(?=[^\s$])((?:[^$\\\n]|\\.)+?)(?<=\S)\$(?![\d$])/g
+      : /(`+)[\s\S]*?\1|\\\[([\s\S]+?)\\\]|\$\$([\s\S]+?)\$\$|\\\(([\s\S]+?)\\\)/g;
+    const sub = (text) => text.replace(re, (m, ticks, d1, d2, i1, i2) => {
+      if (ticks) return m;  // inline code: leave untouched
+      const display = d1 != null || d2 != null;
+      const tex = (d1 ?? d2 ?? i1 ?? i2).trim();
+      maths.push({ tex, display });
+      return `MJXPH${maths.length - 1}X`;
+    });
+
+    // Skip fenced code blocks entirely.
+    const lines = src.replace(/\r\n?/g, '\n').split('\n');
+    const out = []; let buf = []; let fence = null;
+    const flush = () => { if (buf.length) out.push(sub(buf.join('\n'))); buf = []; };
+    for (const line of lines) {
+      if (!fence) {
+        const m = /^\s*(`{3,}|~{3,})/.exec(line);
+        if (m) { flush(); fence = m[1]; out.push(line); } else buf.push(line);
+      } else {
+        out.push(line);
+        if (new RegExp('^\\s*' + fence[0] + '{' + fence.length + ',}\\s*$').test(line)) fence = null;
+      }
+    }
+    flush();
+    return { md: out.join('\n'), maths };
+  }
+
+  // ---------- 2. Math renderers ----------
+  const cache = new Map();
+
+  async function mathToPng(tex, display) {
+    const node = await MathJax.tex2svgPromise(tex, { display, em: EM, ex: EM / 2 });
+    const svg = node.querySelector('svg');
+    const vb = svg.getAttribute('viewBox').split(/\s+/).map(Number);
+    const w = vb[2] / 1000 * EM * MATH_SCALE, h = vb[3] / 1000 * EM * MATH_SCALE;
+    const hEx = parseFloat(svg.getAttribute('height'));
+    const vaEx = parseFloat(svg.style.verticalAlign || '0');
+    const va = hEx ? vaEx * (h / hEx) : 0;
+    svg.setAttribute('width', w + 'px');
+    svg.setAttribute('height', h + 'px');
+    svg.setAttribute('color', TEXT);
+    svg.removeAttribute('style');
+    const xml = new XMLSerializer().serializeToString(svg);
+    const img = new Image();
+    img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml);
+    await img.decode();
+    const W = Math.ceil(w), H = Math.ceil(h);
+    const c = document.createElement('canvas');
+    c.width = W * PNG_SCALE; c.height = H * PNG_SCALE;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);  // readable in dark-mode clients
+    ctx.scale(PNG_SCALE, PNG_SCALE);
+    ctx.drawImage(img, 0, 0, w, h);
+    const el = document.createElement('img');
+    el.src = c.toDataURL('image/png');
+    el.width = W; el.height = H;
+    el.alt = tex;
+    el.style.cssText = `width:${W}px;height:${H}px;vertical-align:${va.toFixed(2)}px;border:0;display:inline-block;`;
+    return el;
+  }
+
+  function loadImg(src) {
+    return new Promise((res) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => res(null); i.src = src; });
+  }
+
+  async function mathToHosted(tex, display) {
+    const DPI = 220, NOMINAL = 110;
+    const body = (display ? '\\displaystyle ' : '\\inline ') + tex;
+    const src = 'https://latex.codecogs.com/png.image?' + encodeURIComponent(`\\dpi{${DPI}}\\bg{white}` + body);
+    const el = document.createElement('img');
+    el.src = src; el.alt = tex;
+    el.style.cssText = 'border:0;vertical-align:middle;display:inline-block;';
+    const probe = await loadImg(src);
+    if (probe) {
+      const k = NOMINAL / DPI;
+      el.width = Math.round(probe.naturalWidth * k);
+      el.height = Math.round(probe.naturalHeight * k);
+      el.style.width = el.width + 'px'; el.style.height = el.height + 'px';
+    }
+    return el;
+  }
+
+  function mathToMathml(tex, display) {
+    const span = document.createElement('span');
+    span.innerHTML = MathJax.tex2mml(tex, { display });
+    return span.firstElementChild || span;
+  }
+
+  async function renderMath(tex, display, mode) {
+    const key = mode + '|' + display + '|' + tex;
+    if (!cache.has(key)) {
+      const p = mode === 'png' ? mathToPng(tex, display)
+              : mode === 'hosted' ? mathToHosted(tex, display)
+              : Promise.resolve(mathToMathml(tex, display));
+      cache.set(key, p.catch((e) => { cache.delete(key); throw e; }));
+    }
+    return (await cache.get(key)).cloneNode(true);
+  }
+
+  // ---------- 3. Inline styles (email clients ignore <style>) ----------
+  const HL = {
+    keyword: 'color:#cf222e', 'selector-tag': 'color:#cf222e', built_in: 'color:#953800', type: 'color:#953800',
+    literal: 'color:#0550ae', number: 'color:#0550ae', string: 'color:#0a3069', regexp: 'color:#0a3069',
+    comment: 'color:#6e7781;font-style:italic', doctag: 'color:#cf222e', meta: 'color:#0550ae',
+    title: 'color:#8250df', 'title.function': 'color:#8250df', 'title.class': 'color:#953800',
+    attr: 'color:#0550ae', attribute: 'color:#0550ae', variable: 'color:#953800', symbol: 'color:#0550ae',
+    section: 'color:#0550ae;font-weight:bold', name: 'color:#116329', 'selector-class': 'color:#6639ba',
+    operator: 'color:#cf222e', punctuation: '', params: '', property: 'color:#0550ae',
+  };
+
+  const STYLE = {
+    h1: 'font-size:26px;line-height:1.25;margin:24px 0 12px;font-weight:600;',
+    h2: 'font-size:21px;line-height:1.3;margin:22px 0 10px;font-weight:600;border-bottom:1px solid #d8dee4;padding-bottom:4px;',
+    h3: 'font-size:18px;line-height:1.35;margin:18px 0 8px;font-weight:600;',
+    h4: 'font-size:16px;margin:16px 0 8px;font-weight:600;',
+    h5: 'font-size:15px;margin:14px 0 6px;font-weight:600;',
+    h6: 'font-size:14px;margin:14px 0 6px;font-weight:600;color:#59636e;',
+    p: 'margin:0 0 12px;',
+    a: 'color:#0969da;text-decoration:underline;',
+    ul: 'margin:0 0 12px;padding-left:26px;', ol: 'margin:0 0 12px;padding-left:26px;',
+    li: 'margin:3px 0;',
+    blockquote: 'margin:0 0 12px;padding:2px 14px;border-left:4px solid #d0d7de;color:#59636e;',
+    pre: `margin:0 0 14px;padding:12px 14px;background:#f6f8fa;border:1px solid #e1e4e8;border-radius:6px;font-family:${MONO};font-size:13px;line-height:1.45;white-space:pre;overflow-x:auto;color:${TEXT};`,
+    code: `font-family:${MONO};font-size:0.88em;background:#eff1f3;padding:1px 5px;border-radius:4px;`,
+    table: 'border-collapse:collapse;margin:0 0 14px;font-size:15px;',
+    th: 'border:1px solid #d0d7de;padding:6px 12px;background:#f6f8fa;font-weight:600;text-align:left;vertical-align:top;',
+    td: 'border:1px solid #d0d7de;padding:6px 12px;vertical-align:top;',
+    hr: 'border:0;border-top:1px solid #d0d7de;margin:18px 0;',
+    strong: 'font-weight:600;',
+    img: 'max-width:100%;',
+  };
+
+  function highlight(codeEl) {
+    const lang = ((codeEl.className.match(/language-([\w+#-]+)/) || [])[1] || '').toLowerCase();
+    if (!window.hljs || !lang || ['text', 'txt', 'plaintext', 'plain'].includes(lang) || !hljs.getLanguage(lang)) return;
+    codeEl.innerHTML = hljs.highlight(codeEl.textContent, { language: lang, ignoreIllegals: true }).value;
+    codeEl.querySelectorAll('span[class]').forEach((s) => {
+      const cls = [...s.classList].map((c) => c.replace(/^hljs-/, '')).filter((c) => !/_$/.test(c));
+      const key = cls.join('.') in HL ? cls.join('.') : cls.find((c) => c in HL);
+      if (key && HL[key]) s.setAttribute('style', HL[key]);
+      s.removeAttribute('class');
+    });
+  }
+
+  function inlineStyles(root) {
+    root.querySelectorAll('pre > code').forEach(highlight);
+    root.querySelectorAll('*').forEach((el) => {
+      const tag = el.tagName.toLowerCase();
+      if (el.dataset.math != null) return;  // math images keep their own styling
+      let s = STYLE[tag];
+      if (tag === 'code' && el.parentElement && el.parentElement.tagName === 'PRE')
+        s = `font-family:${MONO};font-size:13px;background:transparent;padding:0;`;
+      if (tag === 'th' || tag === 'td') {
+        const align = el.getAttribute('align');
+        if (align) s += `text-align:${align};`;
+      }
+      if (s) el.setAttribute('style', (s + (el.getAttribute('style') || '')));
+      el.removeAttribute('class');
+    });
+    // Tight list items: marked emits <li><p> for loose lists; collapse paragraph margins inside.
+    root.querySelectorAll('li > p').forEach((p) => p.style.margin = '0 0 6px');
+    root.querySelectorAll('blockquote > p:last-child, li > p:last-child').forEach((p) => p.style.marginBottom = '0');
+  }
+
+  // ---------- 4. Pipeline ----------
+  let gen = 0;
+  let current = Promise.resolve();
+
+  function render() {
+    const my = ++gen;
+    current = (async () => {
+      const raw = srcEl.value;
+      const mode = $('mathMode').value;
+      const { md, maths } = protectMath(raw, $('dollar').checked);
+      const holder = document.createElement('div');
+      holder.innerHTML = marked.parse(md, { gfm: true, breaks: false });
+
+      if ($('stripUtm').checked) {
+        holder.querySelectorAll('a[href]').forEach((a) => {
+          try {
+            const u = new URL(a.getAttribute('href'));
+            [...u.searchParams.keys()].filter((k) => k.startsWith('utm_')).forEach((k) => u.searchParams.delete(k));
+            a.setAttribute('href', u.toString());
+          } catch {}
+        });
+      }
+
+      // Swap placeholders for rendered math.
+      if (maths.length) {
+        setStatus(`Rendering ${maths.length} formula${maths.length > 1 ? 's' : ''}…`);
+        await MathJax.startup.promise;
+        const walker = document.createTreeWalker(holder, NodeFilter.SHOW_TEXT);
+        const nodes = [];
+        while (walker.nextNode()) if (/MJXPH\d+X/.test(walker.currentNode.nodeValue)) nodes.push(walker.currentNode);
+        let errors = 0;
+        for (const tn of nodes) {
+          const parts = tn.nodeValue.split(/(MJXPH\d+X)/);
+          const frag = document.createDocumentFragment();
+          for (const part of parts) {
+            const m = /^MJXPH(\d+)X$/.exec(part);
+            if (!m) { if (part) frag.appendChild(document.createTextNode(part)); continue; }
+            const { tex, display } = maths[+m[1]];
+            let el;
+            try { el = await renderMath(tex, display, mode); }
+            catch (e) { errors++; el = document.createElement('code'); el.textContent = tex; }
+            if (my !== gen) return;
+            el.dataset.math = '';
+            if (display) {
+              const wrap = document.createElement('div');
+              wrap.setAttribute('style', 'text-align:center;margin:12px 0;overflow-x:auto;');
+              wrap.dataset.math = '';
+              wrap.appendChild(el);
+              frag.appendChild(wrap);
+            } else frag.appendChild(el);
+          }
+          const parent = tn.parentNode;
+          parent.replaceChild(frag, tn);
+          // A <p> holding only display math: drop the <p> wrapper.
+          if (parent.tagName === 'P' && parent.childNodes.length === 1 && parent.firstChild.dataset?.math != null && parent.firstChild.tagName === 'DIV')
+            parent.replaceWith(parent.firstChild);
+        }
+        if (errors) setStatus(`${errors} formula(s) failed to render; shown as code.`, 'err');
+      }
+      if (my !== gen) return;
+
+      inlineStyles(holder);
+      holder.querySelectorAll('[data-math]').forEach((el) => el.removeAttribute('data-math'));
+      outEl.setAttribute('style', `font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;font-size:${EM}px;line-height:1.6;color:${TEXT};`);
+      outEl.replaceChildren(...holder.childNodes);
+      if (!statusEl.classList.contains('err') || !maths.length) setStatus(raw.trim() ? 'Ready.' : '');
+    })().catch((e) => { console.error(e); setStatus('Render error: ' + e.message, 'err'); });
+    return current;
+  }
+
+  function setStatus(msg, kind) {
+    statusEl.textContent = msg;
+    statusEl.className = kind || '';
+  }
+
+  async function copyRendered() {
+    await current;
+    const html = '<meta charset="utf-8">' + outEl.outerHTML.replace(/ id="out"/, '');
+    try {
+      await navigator.clipboard.write([new ClipboardItem({
+        'text/html': new Blob([html], { type: 'text/html' }),
+        'text/plain': new Blob([srcEl.value], { type: 'text/plain' }),
+      })]);
+    } catch {
+      // Fallback: copy the live selection (keeps inline styles).
+      const sel = getSelection(), r = document.createRange();
+      r.selectNodeContents(outEl);
+      sel.removeAllRanges(); sel.addRange(r);
+      const ok = document.execCommand('copy');
+      sel.removeAllRanges();
+      if (!ok) return setStatus('Copy failed — select the preview and press Ctrl/Cmd+C.', 'err');
+    }
+    setStatus('Copied! Paste into your email.', 'ok');
+  }
+
+  // ---------- 5. Wiring ----------
+  let t;
+  const schedule = () => { clearTimeout(t); t = setTimeout(render, 250); };
+  srcEl.addEventListener('input', schedule);
+  ['mathMode', 'dollar', 'stripUtm'].forEach((id) => $(id).addEventListener('change', () => {
+    try { localStorage.setItem('tbh.' + id, $(id).type === 'checkbox' ? $(id).checked : $(id).value); } catch {}
+    $('modeHint').textContent = MODE_HINTS[$('mathMode').value];
+    render();
+  }));
+  $('copy').addEventListener('click', copyRendered);
+  $('sample').addEventListener('click', () => { srcEl.value = SAMPLE; render(); });
+
+  try {
+    const m = localStorage.getItem('tbh.mathMode'); if (m) $('mathMode').value = m;
+    ['dollar', 'stripUtm'].forEach((id) => { const v = localStorage.getItem('tbh.' + id); if (v != null) $(id).checked = v === 'true'; });
+  } catch {}
+  $('modeHint').textContent = MODE_HINTS[$('mathMode').value];
+
+  const SAMPLE = String.raw`**Yes—this is exactly what a counter-based PRNG is designed for.** See [Random123](https://github.com/DEShawResearch/random123?utm_source=chatgpt.com).
+
+## Indexed SplitMix64
+
+` + '```cpp' + String.raw`
+std::uint64_t random_at(std::uint64_t seed, std::uint64_t x)
+{
+    std::uint64_t z = seed + x * 0x9E3779B97F4A7C15ULL;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;   // mix
+    return z ^ (z >> 31);
+}
+` + '```' + String.raw`
+
+Let the increment constant be \(\gamma\). The state update is:
+
+\[
+s_0=\text{seed}, \qquad s_x=s_{x-1}+\gamma \pmod{2^{64}}.
+\]
+
+Therefore:
+
+\[
+\boxed{\operatorname{random\_at}(\text{seed},x)
+=\operatorname{mix64}\!\left(\text{seed}+\gamma x \pmod{2^{64}}\right)}
+\]
+
+It takes **\(O(1)\) time and \(O(1)\) memory**, independent of ` + '`x`' + String.raw`.
+
+| Intended output | Approach |
+|---|---|
+| One value per index | Counter-based PRNG (Philox, Threefry) |
+| A shuffle of ` + '`1…N`' + String.raw` | Keyed permutation with cycle walking |
+`;
+
+  if (window.marked) render(); else setStatus('Failed to load libraries (offline?).', 'err');
+})();
+</script>
+</body>
+</html>
