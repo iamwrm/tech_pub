@@ -15,6 +15,7 @@ https://raw.githack.com/iamwrm/tech_pub/main/static_html/image_compressor.html
 
 Pages:
 
+- [encrypt_example.html](https://raw.githack.com/iamwrm/tech_pub/main/static_html/encrypt_example.html) (password: `demo-open-sesame`)
 - [image_compressor.html](https://raw.githack.com/iamwrm/tech_pub/main/static_html/image_compressor.html)
 - [text_wrapper.html](https://raw.githack.com/iamwrm/tech_pub/main/static_html/text_wrapper.html)
 - [to_better_html.html](https://raw.githack.com/iamwrm/tech_pub/main/static_html/to_better_html.html)
