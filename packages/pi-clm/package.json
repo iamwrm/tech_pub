@@ -1,0 +1,32 @@
+{
+  "name": "pi-clm-vendored",
+  "version": "1.0.0-ren.3",
+  "private": true,
+  "description": "Private vendored pi-clm 1.0.0 with stable continuity placement and hash-only cache diagnostics",
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=22.19.0" },
+  "pi": { "extensions": ["./index.ts"] },
+  "files": ["index.ts", "src", "tests", "steering", "docs", "README.md", "UPSTREAM_README.md", "THIRD_PARTY_NOTICES.md", "Changelog.md", "LICENSE"],
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "npm run check && tsx --test src/__tests__/*.test.ts tests/*.test.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": ">=1.0.4",
+    "@earendil-works/pi-ai": ">=1.0.4",
+    "@earendil-works/pi-coding-agent": ">=1.0.4",
+    "@earendil-works/pi-tui": ">=1.0.4",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "1.0.4",
+    "@earendil-works/pi-ai": "1.0.4",
+    "@earendil-works/pi-coding-agent": "1.0.4",
+    "@earendil-works/pi-tui": "1.0.4",
+    "@types/node": "24.10.0",
+    "tsx": "4.21.0",
+    "typebox": "1.1.12",
+    "typescript": "5.9.3"
+  }
+}
