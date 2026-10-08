@@ -17,12 +17,12 @@ const models = [
   { provider: 'b', id: 'conflicting', cost: { input: 3 } },
 ];
 
-function report(input) {
+function report(input, env = {}) {
   return spawnSync('bash', ['./scripts/show_usd_per_mtok.sh'], {
     cwd: root,
     input,
     encoding: 'utf8',
-    env: { ...process.env, PI_CATALOG_MODULE: prices },
+    env: { ...process.env, MIN_USD: '', PI_CATALOG_MODULE: prices, ...env },
   });
 }
 
@@ -59,6 +59,30 @@ test('JSON report shows input list price beside blended rate and no total list p
   assert.match(result.stdout, /claude-sonnet-5-5\s+1,000\s+0\.0010\s+75\.0%\s+1\.0000\s+3\.0000\s+0\.3333$/m);
   // TOTAL hit: 1,200 cache reads / 1,510 prompt tokens.
   assert.match(result.stdout, /TOTAL\s+ALL\s+2,110\s+0\.0019\s+79\.5%\s+0\.9005\s+N\/A\s+N\/A$/m);
+});
+
+test('MIN_USD collapses cheap rows per period into a trailing "+N Models" row', () => {
+  const input = JSON.stringify({ daily: [
+    { period: '2026-09-23', modelBreakdowns: [
+      { modelName: '[pi] gpt-6-sol', inputTokens: 100, cacheReadTokens: 900, cost: 5 },
+      { modelName: '[pi] small-a', inputTokens: 50, cacheReadTokens: 50, cost: 0.2 },
+      { modelName: '[pi] small-b', inputTokens: 5000, cost: 0.3 },
+    ] },
+    { period: '2026-09-24', modelBreakdowns: [
+      { modelName: '[pi] gpt-6-sol', inputTokens: 100, cost: 3 },
+      { modelName: '[pi] small-a', inputTokens: 10, cost: 0.1 },
+    ] },
+  ] });
+  const result = report(input, { MIN_USD: '1' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.doesNotMatch(result.stdout, /small-/);
+  // The merged row follows the period's kept rows even though it has more tokens.
+  assert.match(result.stdout, /2026-09-23\s+\[pi\] gpt-6-sol.*\n2026-09-23\s+\+2 Models\s+5,100\s+0\.5000\s+1\.0%\s+98\.0392\s+N\/A\s+N\/A$/m);
+  assert.match(result.stdout, /2026-09-24\s+\+1 Model\s+10\s+0\.1000\s+0\.0%\s+10000\.0000\s+N\/A\s+N\/A$/m);
+  // TOTAL is unchanged by collapsing.
+  assert.match(result.stdout, /TOTAL\s+ALL\s+6,210\s+8\.6000\s+15\.3%/);
+  assert.match(report(input).stdout, /\[pi\] small-b/);
+  assert.notEqual(report(input, { MIN_USD: 'abc' }).status, 0);
 });
 
 test('table input preserves parsing and does not price truncated identifiers', () => {

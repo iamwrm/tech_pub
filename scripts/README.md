@@ -17,7 +17,8 @@ scripts/show_usd_per_mtok.sh --help
 With terminal stdin, running the script without a pipe invokes ccusage itself.
 Terminal output uses colored zebra rows; piped output is plain text.
 `USD_MTOK_THEME=light|dark` selects a theme. `NO_COLOR=1` or
-`USD_MTOK_STYLE=plain` disables styling.
+`USD_MTOK_STYLE=plain` disables styling. `MIN_USD=1` collapses each period's
+rows costing under $1 into one `+N Models` row (totals unchanged).
 
 Run the offline tests:
 

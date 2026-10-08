@@ -22,6 +22,10 @@
 #                    provider; N/A if unknown, ambiguous, or another agent; base tier only)
 #   RATIO           $/MTOK / $/MTOK_IN (N/A without a list price)
 #
+# MIN_USD=X collapses each period's rows with usd < X into one "+N Models" row at
+# the end of that period (tokens, usd and cache counts summed, so TOTAL is unchanged;
+# $/MTOK_IN and RATIO are N/A). Unset or 0 keeps every row.
+#
 # On a terminal the report is colored with zebra rows (scripts/usd_per_mtok_render.mjs).
 #   USD_MTOK_THEME  auto (default: ask the terminal's background) | light | dark
 # NO_COLOR, USD_MTOK_STYLE=plain, or a non-terminal stdout prints the plain table;
@@ -67,6 +71,20 @@ table_rows() {
       if (rec && m != "" && trim($5 $6 $7 $8 $9 $10) == "") { cur = trim(cur " " m); next }
       flush()
     }
+    END { flush() }'
+}
+
+# Sorted TSV rows -> same TSV with each period's rows below MIN_USD merged into one
+# trailing "+N Models" row (input price N/A, since the models differ).
+collapse_small() {
+  LC_ALL=C awk -F'\t' -v OFS='\t' -v min="$1" '
+    function flush() {
+      if (k) print per, "+" k (k == 1 ? " Model" : " Models"), t, u, c, q, "N/A"
+      k = t = u = c = q = 0
+    }
+    $1 != per { flush(); per = $1 }
+    $4 + 0 < min { k++; t += $3; u += $4; c += $5; q += $6; next }
+    { print }
     END { flush() }'
 }
 
@@ -125,6 +143,9 @@ main() {
     || die "could not read the installed Pi catalog"
   local sorted
   sorted=$(printf '%s\n' "$priced" | sort -t "$(printf '\t')" -k1,1 -k3,3nr)
+  local min_usd=${MIN_USD:-0}
+  [[ "$min_usd" =~ ^([0-9]+\.?[0-9]*|\.[0-9]+)$ ]] || die "MIN_USD must be a non-negative number (got '$min_usd')"
+  sorted=$(printf '%s\n' "$sorted" | collapse_small "$min_usd")
   # Colored, zebra-striped view on a terminal; the plain aligned table otherwise
   # (pipes, files, NO_COLOR, or USD_MTOK_STYLE=plain) so output stays greppable.
   if [ "${USD_MTOK_STYLE:-}" != plain ] && [ -z "${NO_COLOR:-}" ] && { [ -t 1 ] || [ -n "${FORCE_COLOR:-}" ]; }; then
