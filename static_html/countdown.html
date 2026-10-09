@@ -23,20 +23,59 @@
 </style>
 </head>
 <body>
-<input id="q" autofocus spellcheck="false" autocomplete="off" placeholder="Oct 9, 2pm (America/Los_Angeles)">
+<input id="q" autofocus spellcheck="false" autocomplete="off" placeholder="Oct 9, 2pm PT  ·  Dec 25 9am nyt  ·  tomorrow 8pm hkt">
 <div id="out"></div>
 <script>
 const MONTHS = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"];
-const ZONES = {
-  pt: "America/Los_Angeles", pst: "America/Los_Angeles", pdt: "America/Los_Angeles",
-  mt: "America/Denver", mst: "America/Denver", mdt: "America/Denver",
-  ct: "America/Chicago", cst: "America/Chicago", cdt: "America/Chicago",
-  et: "America/New_York", est: "America/New_York", edt: "America/New_York",
-  utc: "UTC", gmt: "UTC", z: "UTC",
-  bst: "Europe/London", cet: "Europe/Paris", cest: "Europe/Paris",
-  ist: "Asia/Kolkata", jst: "Asia/Tokyo", kst: "Asia/Seoul",
-  sgt: "Asia/Singapore", hkt: "Asia/Hong_Kong", aest: "Australia/Sydney", aedt: "Australia/Sydney",
+// Casual names → IANA zone. Matched as whole words anywhere in the input.
+const ZONE_GROUPS = {
+  "America/Los_Angeles": "pt pst pdt pacific la sf seattle vancouver bay area california cali west coast",
+  "America/Denver": "mt mst mdt mountain denver",
+  "America/Phoenix": "arizona phoenix",
+  "America/Chicago": "ct cst cdt central chicago texas dallas houston austin",
+  "America/New_York": "et est edt eastern ny nyc nyt new york new jersey boston dc toronto miami atlanta east coast",
+  "America/Anchorage": "akst akdt alaska",
+  "Pacific/Honolulu": "hst hawaii honolulu",
+  "America/Sao_Paulo": "brt brazil sao paulo",
+  "America/Mexico_City": "mexico city",
+  "UTC": "utc gmt zulu",
+  "Europe/London": "bst uk london britain",
+  "Europe/Lisbon": "wet west lisbon portugal",
+  "Europe/Paris": "cet cest paris france",
+  "Europe/Berlin": "berlin germany",
+  "Europe/Amsterdam": "amsterdam",
+  "Europe/Zurich": "zurich switzerland",
+  "Europe/Athens": "eet eest athens greece",
+  "Europe/Moscow": "msk moscow russia",
+  "Asia/Dubai": "gst dubai uae",
+  "Asia/Kolkata": "ist india mumbai delhi bangalore",
+  "Asia/Bangkok": "ict bangkok thailand vietnam hanoi",
+  "Asia/Jakarta": "wib jakarta",
+  "Asia/Shanghai": "bjt cn china beijing shanghai shenzhen",
+  "Asia/Hong_Kong": "hk hkt hong kong",
+  "Asia/Taipei": "taipei taiwan",
+  "Asia/Singapore": "sg sgt singapore",
+  "Asia/Manila": "pht manila philippines",
+  "Asia/Seoul": "kst korea seoul",
+  "Asia/Tokyo": "jst japan tokyo",
+  "Australia/Perth": "awst perth",
+  "Australia/Sydney": "aest aedt sydney melbourne",
+  "Pacific/Auckland": "nzst nzdt nz new zealand auckland",
 };
+const ZONES = {};
+for (const [tz, names] of Object.entries(ZONE_GROUPS))
+  for (const n of names.match(/bay area|west coast|east coast|new york|new jersey|hong kong|sao paulo|mexico city|new zealand|\S+/g)) ZONES[n] = tz;
+// Any IANA city too: "tokyo", "los angeles", "kolkata", ...
+try {
+  for (const tz of Intl.supportedValuesOf("timeZone")) {
+    const city = tz.split("/").pop().replace(/_/g, " ").toLowerCase();
+    if (/^(Etc|Antarctica)\//.test(tz) || !tz.includes("/") || city.length < 4 || city in ZONES) continue;
+    if (/^(easter|wake|midway|jersey|christmas|reunion|central)$/.test(city)) continue; // plain words
+    ZONES[city] = tz;
+  }
+} catch {}
+const ALIASES = Object.keys(ZONES).sort((a, b) => b.length - a.length);
+const aliasRe = (a) => a.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "[\\s_]+");
 const LOCAL_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 function validZone(tz) {
@@ -71,28 +110,36 @@ function parse(raw) {
   let s = raw.trim();
   if (!s) return null;
 
-  // Time zone: "(America/Los_Angeles)", "PT", "UTC+8", "GMT-05:30", or a bare IANA name.
+  // Time zone: "(America/Los_Angeles)", "nyt", "pst", "hong kong time", "UTC+8", "GMT-05:30", ...
   let tz = LOCAL_TZ, tzLabel = LOCAL_TZ + " (local)";
+  const resolve = (text) => {
+    const t = text.trim().toLowerCase().replace(/[\s_]+/g, " ").replace(/\s+(standard |daylight )?time$/, "");
+    const off = t.match(/^(?:utc|gmt)?\s*([+-])\s*(\d{1,2})(?::?(\d{2}))?$/);
+    if (off) return { tz: (off[1] === "-" ? -1 : 1) * (+off[2] * 60 + +(off[3] || 0)) * 60000, tzLabel: "UTC" + off[1] + off[2] + (off[3] ? ":" + off[3] : "") };
+    if (ZONES[t]) return { tz: ZONES[t], tzLabel: ZONES[t] };
+    const name = text.trim().replace(/\s+/g, "_");
+    if (validZone(name)) { const n = new Intl.DateTimeFormat("en-US", { timeZone: name }).resolvedOptions().timeZone; return { tz: n, tzLabel: n }; }
+    return null;
+  };
+  const found = (r, m) => { ({ tz, tzLabel } = r); s = s.replace(m, " "); };
   const paren = s.match(/\(([^)]*)\)/);
-  let tzText = null;
-  if (paren) { tzText = paren[1].trim(); s = s.replace(paren[0], " "); }
-  else {
-    const m = s.match(/\b([A-Za-z]+\/[A-Za-z_\/+-]+)\b/) ||
-              s.match(/\b(?:UTC|GMT)\s*[+-]\s*\d{1,2}(?::?\d{2})?\b/i) ||
-              s.match(/\b([A-Za-z]{1,4})\s*$/);
-    if (m && (m[0].includes("/") || /^(utc|gmt)/i.test(m[0]) || ZONES[m[1].toLowerCase()])) {
-      tzText = m[0].trim(); s = s.replace(m[0], " ");
-    }
-  }
-  if (tzText) {
-    const off = tzText.match(/^(?:UTC|GMT)\s*([+-])\s*(\d{1,2})(?::?(\d{2}))?$/i);
-    if (off) {
-      tz = (off[1] === "-" ? -1 : 1) * (+off[2] * 60 + +(off[3] || 0)) * 60000;
-      tzLabel = tzText.toUpperCase().replace(/\s+/g, "");
-    } else {
-      const name = ZONES[tzText.toLowerCase()] || tzText.replace(/\s+/g, "_");
-      if (!validZone(name)) throw new Error(`Unknown time zone "${tzText}"`);
-      tz = name; tzLabel = name;
+  let m;
+  if (paren) {
+    const r = resolve(paren[1]);
+    if (!r) throw new Error(`Unknown time zone "${paren[1].trim()}"`);
+    found(r, paren[0]);
+  } else if ((m = s.match(/\b(?:utc|gmt)\s*[+-]\s*\d{1,2}(?::?\d{2})?\b/i))) {
+    found(resolve(m[0]), m[0]);
+  } else if ((m = s.match(/\b[A-Za-z]+\/[A-Za-z_\/+-]+\b/)) && resolve(m[0])) {
+    found(resolve(m[0]), m[0]);
+  } else {
+    const low = s.toLowerCase();
+    for (const a of ALIASES) {
+      const i = low.search(new RegExp(`(^|[^a-z])${aliasRe(a)}(?![a-z])`));
+      if (i < 0) continue;
+      const hit = s.slice(i).match(new RegExp(`^[^a-z]?${aliasRe(a)}(\\s+(standard\\s+|daylight\\s+)?time\\b)?`, "i"))[0];
+      found({ tz: ZONES[a], tzLabel: ZONES[a] }, hit);
+      break;
     }
   }
 
@@ -113,7 +160,7 @@ function parse(raw) {
   if (h > 23 || mi > 59) throw new Error("Bad time");
 
   // Date: "oct 9", "9 oct", "oct 9 2026", "2026-10-09", "10/9", "10/9/2026", "today", "tomorrow".
-  let y = null, mo = null, d = null, m;
+  let y = null, mo = null, d = null;
   if ((m = s.match(/\b(\d{4})-(\d{1,2})-(\d{1,2})\b/))) { y = +m[1]; mo = +m[2] - 1; d = +m[3]; }
   else if ((m = s.match(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/))) {
     mo = +m[1] - 1; d = +m[2]; if (m[3]) y = m[3].length === 2 ? 2000 + +m[3] : +m[3];
