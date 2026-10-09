@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Countdown</title>
+<style>
+  :root { --bg: #faf9f5; --fg: #1c1a17; --muted: #78716c; --line: #d6d3d1; --accent: #c2410c; --err: #b91c1c; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #1c1a17; --fg: #e7e5e4; --muted: #a8a29e; --line: #44403c; --accent: #fb923c; --err: #f87171; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center;
+         padding: 16px; background: var(--bg); color: var(--fg); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  input { width: min(560px, 100%); font: inherit; font-size: 20px; padding: 12px 14px; border: 1px solid var(--line);
+          border-radius: 8px; background: transparent; color: var(--fg); outline: none; text-align: center; }
+  input:focus { border-color: var(--accent); }
+  #out { margin-top: 28px; text-align: center; min-height: 120px; }
+  #big { font-size: clamp(28px, 7vw, 48px); font-weight: 600; font-variant-numeric: tabular-nums; }
+  #big.past { color: var(--muted); }
+  .sub { margin-top: 10px; color: var(--muted); font-size: 14px; line-height: 1.6; font-variant-numeric: tabular-nums; }
+  .err { color: var(--err); font-size: 15px; }
+</style>
+</head>
+<body>
+<input id="q" autofocus spellcheck="false" autocomplete="off" placeholder="Oct 9, 2pm (America/Los_Angeles)">
+<div id="out"></div>
+<script>
+const MONTHS = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"];
+const ZONES = {
+  pt: "America/Los_Angeles", pst: "America/Los_Angeles", pdt: "America/Los_Angeles",
+  mt: "America/Denver", mst: "America/Denver", mdt: "America/Denver",
+  ct: "America/Chicago", cst: "America/Chicago", cdt: "America/Chicago",
+  et: "America/New_York", est: "America/New_York", edt: "America/New_York",
+  utc: "UTC", gmt: "UTC", z: "UTC",
+  bst: "Europe/London", cet: "Europe/Paris", cest: "Europe/Paris",
+  ist: "Asia/Kolkata", jst: "Asia/Tokyo", kst: "Asia/Seoul",
+  sgt: "Asia/Singapore", hkt: "Asia/Hong_Kong", aest: "Australia/Sydney", aedt: "Australia/Sydney",
+};
+const LOCAL_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+function validZone(tz) {
+  try { new Intl.DateTimeFormat("en-US", { timeZone: tz }); return true; } catch { return false; }
+}
+
+// Wall-clock fields of instant `ts` in zone `tz`.
+function partsIn(ts, tz) {
+  const p = {};
+  for (const { type, value } of new Intl.DateTimeFormat("en-US", {
+    timeZone: tz, hourCycle: "h23", year: "numeric", month: "numeric", day: "numeric",
+    hour: "numeric", minute: "numeric", second: "numeric",
+  }).formatToParts(ts)) p[type] = +value;
+  return p;
+}
+
+function offsetMs(ts, tz) {
+  if (typeof tz === "number") return tz;
+  const p = partsIn(ts, tz);
+  return Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second) - Math.floor(ts / 1000) * 1000;
+}
+
+// Instant for wall time (y, mo, d, h, mi) in tz (IANA name or fixed offset in ms).
+function wallToUtc(y, mo, d, h, mi, tz) {
+  const guess = Date.UTC(y, mo, d, h, mi);
+  let ts = guess - offsetMs(guess, tz);
+  ts = guess - offsetMs(ts, tz);
+  return ts;
+}
+
+function parse(raw) {
+  let s = raw.trim();
+  if (!s) return null;
+
+  // Time zone: "(America/Los_Angeles)", "PT", "UTC+8", "GMT-05:30", or a bare IANA name.
+  let tz = LOCAL_TZ, tzLabel = LOCAL_TZ + " (local)";
+  const paren = s.match(/\(([^)]*)\)/);
+  let tzText = null;
+  if (paren) { tzText = paren[1].trim(); s = s.replace(paren[0], " "); }
+  else {
+    const m = s.match(/\b([A-Za-z]+\/[A-Za-z_\/+-]+)\b/) ||
+              s.match(/\b(?:UTC|GMT)\s*[+-]\s*\d{1,2}(?::?\d{2})?\b/i) ||
+              s.match(/\b([A-Za-z]{1,4})\s*$/);
+    if (m && (m[0].includes("/") || /^(utc|gmt)/i.test(m[0]) || ZONES[m[1].toLowerCase()])) {
+      tzText = m[0].trim(); s = s.replace(m[0], " ");
+    }
+  }
+  if (tzText) {
+    const off = tzText.match(/^(?:UTC|GMT)\s*([+-])\s*(\d{1,2})(?::?(\d{2}))?$/i);
+    if (off) {
+      tz = (off[1] === "-" ? -1 : 1) * (+off[2] * 60 + +(off[3] || 0)) * 60000;
+      tzLabel = tzText.toUpperCase().replace(/\s+/g, "");
+    } else {
+      const name = ZONES[tzText.toLowerCase()] || tzText.replace(/\s+/g, "_");
+      if (!validZone(name)) throw new Error(`Unknown time zone "${tzText}"`);
+      tz = name; tzLabel = name;
+    }
+  }
+
+  const now = Date.now();
+  const nowP = typeof tz === "number" ? (() => { const d = new Date(now + tz); return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate() }; })() : partsIn(now, tz);
+  s = s.toLowerCase().replace(/,/g, " ").replace(/\bat\b/g, " ");
+
+  // Time: "2pm", "2:30 pm", "14:00", "noon", "midnight".
+  let h = 0, mi = 0, haveTime = false;
+  let t = s.match(/\b(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)(?=\s|$)/);
+  if (t) {
+    h = +t[1] % 12 + (t[3][0] === "p" ? 12 : 0); mi = +(t[2] || 0); haveTime = true;
+  } else if ((t = s.match(/\b(\d{1,2}):(\d{2})\b/))) {
+    h = +t[1]; mi = +t[2]; haveTime = true;
+  } else if ((t = s.match(/\bnoon\b/))) { h = 12; haveTime = true; }
+  else if ((t = s.match(/\bmidnight\b/))) { h = 0; haveTime = true; }
+  if (t) s = s.replace(t[0], " ");
+  if (h > 23 || mi > 59) throw new Error("Bad time");
+
+  // Date: "oct 9", "9 oct", "oct 9 2026", "2026-10-09", "10/9", "10/9/2026", "today", "tomorrow".
+  let y = null, mo = null, d = null, m;
+  if ((m = s.match(/\b(\d{4})-(\d{1,2})-(\d{1,2})\b/))) { y = +m[1]; mo = +m[2] - 1; d = +m[3]; }
+  else if ((m = s.match(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/))) {
+    mo = +m[1] - 1; d = +m[2]; if (m[3]) y = m[3].length === 2 ? 2000 + +m[3] : +m[3];
+  }
+  else if ((m = s.match(/\b([a-z]{3,})\.?\s+(\d{1,2})(?:st|nd|rd|th)?\b(?:\s+(\d{4}))?/)) && MONTHS.includes(m[1].slice(0, 3))) {
+    mo = MONTHS.indexOf(m[1].slice(0, 3)); d = +m[2]; if (m[3]) y = +m[3];
+  }
+  else if ((m = s.match(/\b(\d{1,2})(?:st|nd|rd|th)?\s+([a-z]{3,})\.?\b(?:\s+(\d{4}))?/)) && MONTHS.includes(m[2].slice(0, 3))) {
+    mo = MONTHS.indexOf(m[2].slice(0, 3)); d = +m[1]; if (m[3]) y = +m[3];
+  }
+  else if (/\btoday\b|\btonight\b/.test(s) || (haveTime && !/\d/.test(s.replace(/\b(today|tomorrow)\b/, "")))) {
+    y = nowP.year; mo = nowP.month - 1; d = nowP.day;
+    if (/\btomorrow\b/.test(s)) d += 1;
+  }
+  else if (/\btomorrow\b/.test(s)) { y = nowP.year; mo = nowP.month - 1; d = nowP.day + 1; }
+  else throw new Error("Couldn't find a date — try “Oct 9, 2pm (America/Los_Angeles)”");
+  if (mo < 0 || mo > 11 || d < 1 || d > 31) throw new Error("Bad date");
+
+  let ts;
+  if (y == null) {
+    // No year: use this year, unless that's well in the past, then next year.
+    ts = wallToUtc(nowP.year, mo, d, h, mi, tz);
+    if (now - ts > 183 * 86400000) ts = wallToUtc(nowP.year + 1, mo, d, h, mi, tz);
+  } else {
+    ts = wallToUtc(y, mo, d, h, mi, tz);
+  }
+  return { ts, tz, tzLabel };
+}
+
+function fmt(ts, tz) {
+  const o = { weekday: "short", year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" };
+  if (typeof tz === "number") return new Date(ts + tz).toLocaleString("en-US", { ...o, timeZone: "UTC" });
+  return new Date(ts).toLocaleString("en-US", { ...o, timeZone: tz, timeZoneName: "short" });
+}
+
+const q = document.getElementById("q"), out = document.getElementById("out");
+let target = null, err = null;
+
+function plural(n, w) { return `${n} ${w}${n === 1 ? "" : "s"}`; }
+
+function render() {
+  if (err) { out.innerHTML = `<div class="err"></div>`; out.firstChild.textContent = err; return; }
+  if (!target) { out.innerHTML = ""; return; }
+  const diff = target.ts - Date.now(), past = diff < 0;
+  let secs = Math.floor(Math.abs(diff) / 1000);
+  const days = Math.floor(secs / 86400); secs -= days * 86400;
+  const hours = Math.floor(secs / 3600); secs -= hours * 3600;
+  const mins = Math.floor(secs / 60); secs -= mins * 60;
+  const totalH = Math.abs(diff) / 3600000;
+  const big = `${plural(days, "day")} ${plural(hours, "hour")} ${plural(mins, "minute")}`;
+  out.innerHTML = `
+    <div id="big" class="${past ? "past" : ""}"></div>
+    <div class="sub" id="detail"></div>`;
+  out.querySelector("#big").textContent = past ? `${big} ago` : big;
+  const lines = [
+    `${secs}s · ${totalH.toFixed(1)} hours total`,
+    `Target: ${fmt(target.ts, target.tz)}${typeof target.tz === "number" ? " " + target.tzLabel : ""}`,
+  ];
+  if (target.tz !== LOCAL_TZ) lines.push(`Your time: ${fmt(target.ts, LOCAL_TZ)}`);
+  out.querySelector("#detail").innerHTML = lines.map(l => `<div></div>`).join("");
+  out.querySelectorAll("#detail div").forEach((el, i) => el.textContent = lines[i]);
+}
+
+function update() {
+  try { target = parse(q.value); err = null; }
+  catch (e) { target = null; err = e.message; }
+  try { history.replaceState(null, "", q.value.trim() ? "#" + encodeURIComponent(q.value.trim()) : location.pathname + location.search); } catch {}
+  render();
+}
+
+q.addEventListener("input", update);
+if (location.hash.length > 1) { q.value = decodeURIComponent(location.hash.slice(1)); }
+update();
+setInterval(render, 1000);
+</script>
+</body>
+</html>
