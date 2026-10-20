@@ -5,9 +5,43 @@
  * and can be copied alone into agent_extensions.
  * Try it without installing: `pi -e ./0014-timeline.ts`
  *
- * Inlined: scrubTerminalSequences from 0013 plus the fullscreen rail. Private
- * seams were most recently validated on Pi 0.84.3; compatible later runtimes
- * are admitted by runtime-shape checks and still fail closed on anomalies.
+ * Inlined: scrubTerminalSequences from terminal-sanitizer.ts plus the
+ * fullscreen rail.
+ *
+ * Conversation timeline: a default-on, vertical-only Grok-style navigator
+ * over Pi's fullscreen transcript. /timeline remains the explicit hide/show
+ * toggle.
+ *
+ * The fullscreen private seams were most recently validated on Pi 1.3.0.
+ * Compatible runtimes get a one-column "spine" that replaces the native
+ * scrollbar: every prompt is a tick at its proportional transcript position
+ * (long turns leave long gaps), the viewport is the scrollbar thumb, and the
+ * prompt owning the viewport is an accent ◆. Hover (or keyboard focus) shows a
+ * card with turn number, age, tool count and the prompt preview; click jumps.
+ * The scrollback's last row is the follow control: ● while following live
+ * (accent while the agent runs), otherwise ↓ or ↓ N with N newer prompts below;
+ * clicking it jumps to the transcript end and restores Pi's live follow mode.
+ *
+ * Pi does not expose those seams publicly, so this file applies a fail-closed
+ * in-memory prototype patch only when the expected runtime method/property
+ * shapes are present and restores it on shutdown. It never patches Pi files
+ * on disk. There is intentionally no horizontal or regular-mode fallback:
+ * incompatible runtimes, regular/RPC modes, narrow terminals, and transcripts
+ * without jumpable prompt anchors keep Pi's normal UI.
+ *
+ * alt+, / alt+. step the vertical selection and show the same preview as
+ * hover. Navigating away pauses transcript following; ↓ scrolls to the newest
+ * model/tool output and returns to ●, which stays pinned as output grows. Pi intentionally does not emit passive motion under
+ * tmux/Zellij/screen, so those environments get click plus keyboard navigation
+ * without forcing a laggy terminal mode.
+ *
+ * Enabled by default in fullscreen TUI sessions; /timeline hides or re-shows
+ * it. Turns are recomputed from the active branch
+ * (ctx.sessionManager.getBranch()) on every lifecycle boundary, so the rail
+ * stays correct across /tree branch switches, session restores, and forks
+ * without persisted state. The rail projects that branch onto Pi's rendered
+ * prompt anchors, so compacted-away or textless turns cannot create visible
+ * ticks whose clicks would be no-ops.
  */
 
 import {
@@ -154,13 +188,22 @@ export function scrubTerminalSequences(input: string): string {
 }
 
 export const TIMELINE_MIN_TERMINAL_WIDTH = 30;
-export const TIMELINE_RAIL_WIDTH = 2;
-export const TIMELINE_LATEST_CONTROL_WIDTH = 13;
-export const TIMELINE_LATEST_LABEL = "[↓ Latest]";
-export const TIMELINE_FOLLOWING_LABEL = "[✓ Following]";
+export const TIMELINE_MIN_SCROLLBACK_WIDTH = 13;
+export const TIMELINE_RAIL_WIDTH = 1;
+export const TIMELINE_LATEST_LABEL = "↓";
+export const TIMELINE_FOLLOWING_LABEL = "●";
+export const TIMELINE_OLDER_LABEL = "↑";
+/** Track rows per prompt before the rail pages; keeps gaps and the thumb legible. */
+export const TIMELINE_ROWS_PER_TICK = 2;
 export const TIMELINE_PREVIEW_MAX_CHARS = 120;
 export const TIMELINE_PREVIEW_MIN_TEXT_WIDTH = 16;
-export const TIMELINE_PREVIEW_MAX_TEXT_WIDTH = 48;
+export const TIMELINE_PREVIEW_MAX_TEXT_WIDTH = 32;
+
+const TRACK_GLYPH = "│";
+const THUMB_GLYPH = "┃";
+const TICK_GLYPH = "•";
+const ACTIVE_TICK_GLYPH = "◆";
+const HOVER_TICK_GLYPH = "◇";
 
 const PATCH_KEY = Symbol.for("ren-public-package.timeline-fullscreen.patch.v1");
 const PROMPT_START = /^\x1b\]133;A(?:\x07|\x1b\\)/;
@@ -170,6 +213,12 @@ export interface FullscreenTimelineTurn {
 	/** Exact text Pi's UserMessageComponent receives (text blocks concatenated). */
 	renderText: string;
 	preview: string;
+	/** 1-based position among the branch's user prompts, compacted ones included. */
+	ordinal: number;
+	/** Prompt time in epoch milliseconds, when the session recorded one. */
+	timestamp?: number;
+	/** Tool calls the assistant made before the next prompt. */
+	toolCount: number;
 }
 
 export interface TimelineRuntimeTheme {
@@ -177,6 +226,8 @@ export interface TimelineRuntimeTheme {
 	accent(text: string): string;
 	text(text: string): string;
 	panel(text: string): string;
+	track(text: string): string;
+	thumb(text: string): string;
 }
 
 export const PLAIN_RUNTIME_THEME: TimelineRuntimeTheme = {
@@ -184,12 +235,16 @@ export const PLAIN_RUNTIME_THEME: TimelineRuntimeTheme = {
 	accent: (text) => text,
 	text: (text) => text,
 	panel: (text) => text,
+	track: (text) => text,
+	thumb: (text) => text,
 };
 
 interface TimelineHost {
 	getTurns(): readonly FullscreenTimelineTurn[];
 	getSelected(): number;
 	select(turnIndex: number): void;
+	/** True while the agent is producing output; tints the live-follow dot. */
+	isBusy?(): boolean;
 }
 
 export interface TimelineRect {
@@ -199,31 +254,40 @@ export interface TimelineRect {
 	height: number;
 }
 
-export type VerticalTimelineHit =
-	| { type: "tick"; turnIndex: number }
-	| { type: "up" }
-	| { type: "down" }
-	| { type: "latest" };
+export type VerticalTimelineHit = { type: "tick"; turnIndex: number } | { type: "latest" } | { type: "older" };
 
+/**
+ * One-column spine over the scrollbar gutter. Every rail turn of the shown
+ * page sits at its proportional position within that page's transcript span;
+ * the thumb marks the visible rows. The scrollback's last row holds the follow
+ * control. Beyond one prompt per TIMELINE_ROWS_PER_TICK rows the rail pages
+ * from the newest end, and the first row becomes the ↑ K older-prompts control.
+ */
 export interface VerticalTimelineRail {
+	/** The track column, excluding control rows. */
 	rect: TimelineRect;
-	window: { start: number; end: number };
-	ticksY: number;
-	upY: number;
-	downY: number;
+	/** Rail indices [start, end) shown on this page. */
+	page: { start: number; end: number; index: number; count: number; size: number };
+	/** Absolute screen row of each shown tick; tickRows[i] belongs to rail index page.start + i. */
+	tickRows: number[];
+	/** Absolute screen rows [top, top + height) covered by the viewport thumb; height 0 when off-page. */
+	thumb: { top: number; height: number };
 	latestRect: TimelineRect;
+	latestLabel: string;
+	/** Present only when paging and an older page exists. */
+	olderRect?: TimelineRect;
+	olderLabel?: string;
 	active?: number;
-	upTarget?: number;
-	downTarget?: number;
 	followingEnd: boolean;
+	/** Rail prompts that start below the visible viewport. */
+	newerBelow: number;
 }
 
-interface TimelineViewport {
+export interface TimelineViewport {
 	active?: number;
-	upTarget?: number;
-	downTarget?: number;
-	atBottom: boolean;
 	followingEnd: boolean;
+	scrollTop: number;
+	contentHeight: number;
 }
 
 interface RuntimeScrollView {
@@ -446,70 +510,130 @@ export function timelinePromptPreview(text: string, maxChars = TIMELINE_PREVIEW_
 	return `${chars.slice(0, limit - 1).join("")}…`;
 }
 
+/**
+ * Map content rows onto track rows. While every tick can own a row, collisions
+ * are nudged apart (keeping order) so each prompt stays individually clickable.
+ */
+export function spreadTimelineTicks(idealRows: readonly number[], trackRows: number): number[] {
+	const last = Math.max(0, trackRows - 1);
+	const rows = idealRows.map((row) => Math.min(Math.max(0, Math.floor(row)), last));
+	if (rows.length > trackRows) return rows;
+	for (let index = 1; index < rows.length; index++) rows[index] = Math.max(rows[index]!, rows[index - 1]! + 1);
+	for (let index = rows.length - 1; index >= 0; index--) {
+		rows[index] = Math.min(rows[index]!, index === rows.length - 1 ? last : rows[index + 1]! - 1);
+	}
+	return rows;
+}
+
+/** Rail indices of a page; pages are aligned to the newest end so the last page is always full. */
+export function timelinePageBounds(turnCount: number, pageSize: number, page: number): { start: number; end: number } {
+	const size = Math.max(1, Math.floor(pageSize));
+	const count = Math.max(1, Math.ceil(turnCount / size));
+	const index = Math.min(Math.max(0, Math.floor(page)), count - 1);
+	const end = turnCount - (count - 1 - index) * size;
+	return { start: Math.max(0, end - size), end };
+}
+
+/** Page holding a rail index under newest-end alignment; undefined means the newest page. */
+export function timelinePageOf(turnCount: number, pageSize: number, railIndex: number | undefined): number {
+	const size = Math.max(1, Math.floor(pageSize));
+	const last = Math.max(0, Math.ceil(turnCount / size) - 1);
+	if (railIndex === undefined) return last;
+	return Math.max(0, last - Math.floor((turnCount - 1 - railIndex) / size));
+}
+
 export function computeVerticalTimelineRail(
 	scrollback: TimelineRect,
-	turnCount: number,
+	anchorRows: readonly number[],
 	viewport: TimelineViewport,
+	requestedPage?: number,
 ): VerticalTimelineRail | undefined {
-	if (turnCount < 1 || scrollback.width < TIMELINE_LATEST_CONTROL_WIDTH || scrollback.height < 4) return undefined;
-	const maxTicks = scrollback.height - 3;
-	let start = 0;
-	if (turnCount > maxTicks) {
-		const tailStart = turnCount - maxTicks;
-		if (viewport.atBottom) start = tailStart;
-		else start = Math.min(Math.max(0, (viewport.active ?? turnCount - 1) - Math.floor(maxTicks / 2)), tailStart);
+	if (anchorRows.length < 1 || scrollback.width < TIMELINE_MIN_SCROLLBACK_WIDTH || scrollback.height < 4) return undefined;
+	const turnCount = anchorRows.length;
+	const contentHeight = Math.max(1, viewport.contentHeight, ...anchorRows.map((row) => row + 1));
+	const paged = turnCount > Math.floor((scrollback.height - 1) / TIMELINE_ROWS_PER_TICK);
+	const trackTop = scrollback.y + (paged ? 1 : 0);
+	const trackRows = scrollback.height - 1 - (paged ? 1 : 0);
+	const pageSize = paged ? Math.max(1, Math.floor(trackRows / TIMELINE_ROWS_PER_TICK)) : turnCount;
+	const pageCount = Math.ceil(turnCount / pageSize);
+	const pageIndex = Math.min(
+		Math.max(0, requestedPage ?? timelinePageOf(turnCount, pageSize, viewport.active)),
+		pageCount - 1,
+	);
+	const { start, end } = timelinePageBounds(turnCount, pageSize, pageIndex);
+
+	// A page spans from its first prompt (the transcript top for page 0) to the
+	// next page's first prompt (the transcript end for the newest page).
+	const spanStart = start === 0 ? 0 : anchorRows[start]!;
+	const spanEnd = end === turnCount ? contentHeight : anchorRows[end]!;
+	const scale = trackRows / Math.max(1, spanEnd - spanStart);
+	const tickRows = spreadTimelineTicks(
+		anchorRows.slice(start, end).map((row) => (row - spanStart) * scale),
+		trackRows,
+	).map((row) => trackTop + row);
+
+	const scrollTop = Math.min(Math.max(0, viewport.scrollTop), contentHeight);
+	const viewportEnd = Math.min(contentHeight, scrollTop + scrollback.height);
+	const visibleStart = Math.max(scrollTop, spanStart);
+	const visibleEnd = Math.min(viewportEnd, spanEnd);
+	let thumb = { top: trackTop, height: 0 };
+	if (visibleEnd > visibleStart || (visibleEnd === visibleStart && spanStart === spanEnd)) {
+		const thumbStart = Math.min(trackRows - 1, Math.floor((visibleStart - spanStart) * scale));
+		const thumbEnd = Math.min(trackRows, Math.max(thumbStart + 1, Math.ceil((visibleEnd - spanStart) * scale)));
+		thumb = { top: trackTop + thumbStart, height: thumbEnd - thumbStart };
 	}
-	const end = Math.min(turnCount, start + maxTicks);
-	const totalRows = end - start + 3;
-	const top = scrollback.y + Math.floor((scrollback.height - totalRows) / 2);
-	const downY = top + 1 + (end - start);
-	return {
-		rect: {
-			x: scrollback.x + scrollback.width - TIMELINE_RAIL_WIDTH,
-			y: scrollback.y,
-			width: TIMELINE_RAIL_WIDTH,
-			height: scrollback.height,
-		},
-		window: { start, end },
-		ticksY: top + 1,
-		upY: top,
-		downY,
-		latestRect: {
-			x: scrollback.x + scrollback.width - TIMELINE_LATEST_CONTROL_WIDTH,
-			y: downY + 1,
-			width: TIMELINE_LATEST_CONTROL_WIDTH,
-			height: 1,
-		},
-		...(viewport.active === undefined ? {} : { active: viewport.active }),
-		...(viewport.upTarget === undefined ? {} : { upTarget: viewport.upTarget }),
-		...(viewport.downTarget === undefined ? {} : { downTarget: viewport.downTarget }),
-		followingEnd: viewport.followingEnd === true,
+
+	const followingEnd = viewport.followingEnd === true;
+	const newerBelow = anchorRows.filter((row) => row >= viewportEnd).length;
+	const latestLabel = followingEnd
+		? TIMELINE_FOLLOWING_LABEL
+		: newerBelow > 0
+			? `${TIMELINE_LATEST_LABEL} ${newerBelow}`
+			: TIMELINE_LATEST_LABEL;
+	const railX = scrollback.x + scrollback.width - TIMELINE_RAIL_WIDTH;
+	const controlRect = (label: string, y: number): TimelineRect => {
+		const width = visibleWidth(label);
+		return { x: railX + TIMELINE_RAIL_WIDTH - width, y, width, height: 1 };
 	};
+	const olderLabel = start > 0 ? `${TIMELINE_OLDER_LABEL} ${start}` : undefined;
+	return {
+		rect: { x: railX, y: trackTop, width: TIMELINE_RAIL_WIDTH, height: trackRows },
+		page: { start, end, index: pageIndex, count: pageCount, size: pageSize },
+		tickRows,
+		thumb,
+		latestRect: controlRect(latestLabel, scrollback.y + scrollback.height - 1),
+		latestLabel,
+		...(olderLabel === undefined ? {} : { olderLabel, olderRect: controlRect(olderLabel, scrollback.y) }),
+		...(viewport.active === undefined ? {} : { active: viewport.active }),
+		followingEnd,
+		newerBelow,
+	};
+}
+
+/** Rail-wide bounds, including the control rows, for pointer ownership. */
+export function timelineRailContains(rail: VerticalTimelineRail, x: number, y: number): boolean {
+	return (
+		pointInRect(rail.rect, x, y) ||
+		pointInRect(rail.latestRect, x, y) ||
+		(rail.olderRect !== undefined && pointInRect(rail.olderRect, x, y)) ||
+		// The reserved older-control row stays rail-owned on the first page too.
+		(rail.page.count > 1 && x === rail.rect.x && y === rail.rect.y - 1)
+	);
 }
 
 export function hitVerticalTimelineRail(rail: VerticalTimelineRail, x: number, y: number): VerticalTimelineHit | undefined {
 	if (pointInRect(rail.latestRect, x, y)) return { type: "latest" };
-	if (x < rail.rect.x || x >= rail.rect.x + rail.rect.width || y < rail.rect.y || y >= rail.rect.y + rail.rect.height) {
-		return undefined;
-	}
-	if (y === rail.upY) return { type: "up" };
-	if (y === rail.downY) return { type: "down" };
-	const relative = y - rail.ticksY;
-	if (relative >= 0 && relative < rail.window.end - rail.window.start) {
-		return { type: "tick", turnIndex: rail.window.start + relative };
-	}
-	return undefined;
+	if (rail.olderRect && pointInRect(rail.olderRect, x, y)) return { type: "older" };
+	if (!pointInRect(rail.rect, x, y)) return undefined;
+	const activeOffset = rail.active === undefined ? -1 : rail.active - rail.page.start;
+	if (activeOffset >= 0 && rail.tickRows[activeOffset] === y) return { type: "tick", turnIndex: rail.active! };
+	const offset = rail.tickRows.indexOf(y);
+	return offset < 0 ? undefined : { type: "tick", turnIndex: rail.page.start + offset };
 }
 
 function sameHit(left: VerticalTimelineHit | undefined, right: VerticalTimelineHit | undefined): boolean {
 	if (!left || !right) return left === right;
 	return left.type === right.type && (left.type !== "tick" || right.type !== "tick" || left.turnIndex === right.turnIndex);
-}
-
-function hitTarget(rail: VerticalTimelineRail, hit: VerticalTimelineHit): number | undefined {
-	if (hit.type === "tick") return hit.turnIndex;
-	if (hit.type === "latest") return undefined;
-	return hit.type === "up" ? rail.upTarget : rail.downTarget;
 }
 
 function pointInRect(rect: TimelineRect, x: number, y: number): boolean {
@@ -537,12 +661,30 @@ export function wrapTimelinePreview(preview: string, width: number): string[] {
 	return [wrapped[0]!, finalLine];
 }
 
-/** Two-thirds-width hover card, bounded by its cap and the rail-side gap. */
+/** Half-width hover card, bounded by its cap and the rail-side gap. */
 export function timelinePreviewTextWidth(scrollbackWidth: number): number {
 	const width = Math.max(1, Math.floor(scrollbackWidth));
-	const available = Math.max(1, width - 5); // four frame columns plus one rail gap
-	const responsive = Math.max(TIMELINE_PREVIEW_MIN_TEXT_WIDTH, Math.floor((width * 2) / 3));
+	const available = Math.max(1, width - 6); // rail, one gap column, four frame columns
+	const responsive = Math.max(TIMELINE_PREVIEW_MIN_TEXT_WIDTH, Math.floor(width / 2));
 	return Math.max(1, Math.min(TIMELINE_PREVIEW_MAX_TEXT_WIDTH, responsive, available));
+}
+
+export function timelineRelativeAge(timestamp: number, now: number): string {
+	const seconds = Math.max(0, Math.floor((now - timestamp) / 1000));
+	if (seconds < 45) return "just now";
+	const minutes = Math.max(1, Math.round(seconds / 60));
+	if (minutes < 60) return `${minutes}m ago`;
+	const hours = Math.round(minutes / 60);
+	if (hours < 24) return `${hours}h ago`;
+	return `${Math.round(hours / 24)}d ago`;
+}
+
+/** `#4 · 14m ago · 3 tools`; unknown or zero parts are omitted. */
+export function timelineCardHeader(turn: FullscreenTimelineTurn, now: number): string {
+	const parts = [`#${turn.ordinal}`];
+	if (turn.timestamp !== undefined && Number.isFinite(turn.timestamp)) parts.push(timelineRelativeAge(turn.timestamp, now));
+	if (turn.toolCount > 0) parts.push(`${turn.toolCount} ${turn.toolCount === 1 ? "tool" : "tools"}`);
+	return parts.join(" · ");
 }
 
 function compositeCell(screen: string[], row: number, text: string, x: number, cellWidth: number, totalWidth: number): void {
@@ -559,69 +701,81 @@ export function compositeVerticalTimeline(
 	turns: readonly FullscreenTimelineTurn[],
 	hovered: VerticalTimelineHit | undefined,
 	theme: TimelineRuntimeTheme = PLAIN_RUNTIME_THEME,
+	options: { now?: number; busy?: boolean } = {},
 ): string[] {
 	const screen = [...input];
 	while (screen.length < scrollback.y + scrollback.height) screen.push("");
 
-	const upEnabled = rail.upTarget !== undefined;
-	const downEnabled = rail.downTarget !== undefined;
-	const up = hovered?.type === "up" && upEnabled ? theme.text(" ▴") : upEnabled ? theme.dim(" ▴") : theme.dim("  ");
-	const down =
-		hovered?.type === "down" && downEnabled ? theme.text(" ▾") : downEnabled ? theme.dim(" ▾") : theme.dim("  ");
-	compositeCell(screen, rail.upY, up, rail.rect.x, TIMELINE_RAIL_WIDTH, width);
-	compositeCell(screen, rail.downY, down, rail.rect.x, TIMELINE_RAIL_WIDTH, width);
-	const latestLabel = rail.followingEnd ? TIMELINE_FOLLOWING_LABEL : TIMELINE_LATEST_LABEL;
-	const latestPadding = " ".repeat(Math.max(0, rail.latestRect.width - visibleWidth(latestLabel)));
+	const tickRow = (turnIndex: number | undefined): number | undefined =>
+		turnIndex === undefined || turnIndex < rail.page.start || turnIndex >= rail.page.end
+			? undefined
+			: rail.tickRows[turnIndex - rail.page.start];
+	const ticksByRow = new Map<number, number>();
+	for (let index = rail.tickRows.length - 1; index >= 0; index--) ticksByRow.set(rail.tickRows[index]!, rail.page.start + index);
+	const activeRow = tickRow(rail.active);
+	if (activeRow !== undefined) ticksByRow.set(activeRow, rail.active!);
+	const hoveredTick = hovered?.type === "tick" ? hovered.turnIndex : undefined;
+	const hoveredRow = tickRow(hoveredTick);
+	if (hoveredTick !== undefined && hoveredRow !== undefined) {
+		const row = hoveredRow;
+		// The active diamond wins a shared row; otherwise show the hovered prompt.
+		if (ticksByRow.get(row) !== rail.active) ticksByRow.set(row, hoveredTick);
+	}
+
+	const thumbEnd = rail.thumb.top + rail.thumb.height;
+	for (let row = rail.rect.y; row < rail.rect.y + rail.rect.height; row++) {
+		const inThumb = row >= rail.thumb.top && row < thumbEnd;
+		const turnIndex = ticksByRow.get(row);
+		let cell: string;
+		if (turnIndex === undefined) cell = inThumb ? theme.thumb(THUMB_GLYPH) : theme.track(TRACK_GLYPH);
+		else if (turnIndex === rail.active) cell = theme.accent(ACTIVE_TICK_GLYPH);
+		else if (turnIndex === hoveredTick) cell = theme.accent(HOVER_TICK_GLYPH);
+		else cell = theme.thumb(TICK_GLYPH);
+		compositeCell(screen, row, cell, rail.rect.x, TIMELINE_RAIL_WIDTH, width);
+	}
+
 	const latestText = rail.followingEnd
-		? theme.dim(latestLabel)
-		: hovered?.type === "latest"
-			? theme.accent(latestLabel)
-			: theme.text(latestLabel);
-	compositeCell(
-		screen,
-		rail.latestRect.y,
-		theme.panel(`${latestPadding}${latestText}`),
-		rail.latestRect.x,
-		rail.latestRect.width,
-		width,
-	);
-
-	for (let turnIndex = rail.window.start; turnIndex < rail.window.end; turnIndex++) {
-		const row = rail.ticksY + turnIndex - rail.window.start;
-		const isActive = rail.active === turnIndex;
-		const isHovered = hovered?.type === "tick" && hovered.turnIndex === turnIndex;
-		const tick = isActive ? theme.accent("━━") : isHovered ? theme.text("──") : theme.dim(" ─");
-		compositeCell(screen, row, tick, rail.rect.x, TIMELINE_RAIL_WIDTH, width);
+		? options.busy
+			? theme.accent(rail.latestLabel)
+			: theme.dim(rail.latestLabel)
+		: theme.panel(hovered?.type === "latest" ? theme.accent(rail.latestLabel) : theme.text(rail.latestLabel));
+	compositeCell(screen, rail.latestRect.y, latestText, rail.latestRect.x, rail.latestRect.width, width);
+	if (rail.olderRect && rail.olderLabel) {
+		const label = hovered?.type === "older" ? theme.accent(rail.olderLabel) : theme.text(rail.olderLabel);
+		compositeCell(screen, rail.olderRect.y, theme.panel(label), rail.olderRect.x, rail.olderRect.width, width);
+	} else if (rail.page.count > 1) {
+		compositeCell(screen, rail.rect.y - 1, theme.track(TRACK_GLYPH), rail.rect.x, TIMELINE_RAIL_WIDTH, width);
 	}
 
-	if (hovered?.type !== "tick" || !rail.window || hovered.turnIndex < rail.window.start || hovered.turnIndex >= rail.window.end) {
-		return screen;
-	}
-	const preview = turns[hovered.turnIndex]?.preview.trim();
-	if (!preview) return screen;
+	if (hoveredTick === undefined || hoveredRow === undefined) return screen;
+	const turn = turns[hoveredTick];
+	const preview = turn?.preview.trim();
+	if (!turn || !preview) return screen;
 
 	const maxTextWidth = timelinePreviewTextWidth(scrollback.width);
 	const previewLines = wrapTimelinePreview(preview, maxTextWidth);
 	if (previewLines.length === 0) return screen;
-	const textWidth = Math.max(...previewLines.map((line) => visibleWidth(line)));
+	const header = stripTerminalSequences(truncateToWidth(timelineCardHeader(turn, options.now ?? Date.now()), maxTextWidth, "…"));
+	const lines = [header, ...previewLines];
+	const textWidth = Math.max(...lines.map((line) => visibleWidth(line)));
 	const cardWidth = textWidth + 4;
-	const cardHeight = previewLines.length + 2;
-	const previewBottom = rail.latestRect.y;
-	if (cardHeight > previewBottom - scrollback.y || cardWidth + 1 > scrollback.width) return screen;
+	const cardHeight = lines.length + 2;
+	if (cardHeight > rail.rect.height || cardWidth + TIMELINE_RAIL_WIDTH + 1 > scrollback.width) return screen;
 
-	const tickY = rail.ticksY + hovered.turnIndex - rail.window.start;
+	const tickY = hoveredRow;
 	const cardX = Math.max(scrollback.x, rail.rect.x - cardWidth - 1);
 	const cardY = Math.max(
-		scrollback.y,
-		Math.min(tickY - Math.floor(cardHeight / 2), previewBottom - cardHeight),
+		rail.rect.y,
+		Math.min(tickY - Math.floor(cardHeight / 2), rail.rect.y + rail.rect.height - cardHeight),
 	);
 	const top = theme.panel(theme.dim(`╭${"─".repeat(cardWidth - 2)}╮`));
 	const bottom = theme.panel(theme.dim(`╰${"─".repeat(cardWidth - 2)}╯`));
 	compositeCell(screen, cardY, top, cardX, cardWidth, width);
-	for (let index = 0; index < previewLines.length; index++) {
-		const line = previewLines[index]!;
+	for (let index = 0; index < lines.length; index++) {
+		const line = lines[index]!;
 		const gap = " ".repeat(Math.max(0, textWidth - visibleWidth(line)));
-		const framed = theme.panel(`${theme.dim("│")} ${theme.text(line)}${gap} ${theme.dim("│")}`);
+		const body = index === 0 ? theme.dim(line) : theme.text(line);
+		const framed = theme.panel(`${theme.dim("│")} ${body}${gap} ${theme.dim("│")}`);
 		compositeCell(screen, cardY + 1 + index, framed, cardX, cardWidth, width);
 	}
 	compositeCell(screen, cardY + cardHeight - 1, bottom, cardX, cardWidth, width);
@@ -729,14 +883,6 @@ function readViewportSnapshot(tui: RuntimeTui, turns: readonly FullscreenTimelin
 	const maxScrollTop = Math.max(0, contentHeight - box.rect.height);
 	const atBottom = scrollView.scrollTop >= maxScrollTop;
 	if (atBottom && ordered.length > 0) active = ordered[ordered.length - 1]![0];
-	let upTarget: number | undefined;
-	let downTarget: number | undefined;
-	if (active !== undefined) {
-		for (const [turnIndex] of ordered) {
-			if (turnIndex < active) upTarget = turnIndex;
-			else if (turnIndex > active && downTarget === undefined) downTarget = turnIndex;
-		}
-	}
 	const anchorSignature = ordered.map(([turnIndex, row]) => `${turnIndex}:${row}`).join(",");
 	return {
 		box,
@@ -744,27 +890,18 @@ function readViewportSnapshot(tui: RuntimeTui, turns: readonly FullscreenTimelin
 		anchors,
 		viewport: {
 			...(active === undefined ? {} : { active }),
-			...(upTarget === undefined ? {} : { upTarget }),
-			...(downTarget === undefined ? {} : { downTarget }),
-			atBottom,
 			followingEnd: scrollView.isFollowingEnd,
+			scrollTop: scrollView.scrollTop,
+			contentHeight,
 		},
 		signature: `${layout.width}x${layout.height}|${box.rect.x},${box.rect.y},${box.rect.width},${box.rect.height}|${scrollView.scrollTop}/${contentHeight}|follow:${scrollView.isFollowingEnd ? 1 : 0}|${anchorSignature}`,
 	};
 }
 
 function projectTimelineViewport(viewport: TimelineViewport, turnIndices: readonly number[]): TimelineViewport {
-	const positions = new Map(turnIndices.map((turnIndex, railIndex) => [turnIndex, railIndex]));
-	const active = viewport.active === undefined ? undefined : positions.get(viewport.active);
-	const upTarget = viewport.upTarget === undefined ? undefined : positions.get(viewport.upTarget);
-	const downTarget = viewport.downTarget === undefined ? undefined : positions.get(viewport.downTarget);
-	return {
-		...(active === undefined ? {} : { active }),
-		...(upTarget === undefined ? {} : { upTarget }),
-		...(downTarget === undefined ? {} : { downTarget }),
-		atBottom: viewport.atBottom,
-		followingEnd: viewport.followingEnd,
-	};
+	const { active: branchActive, ...rest } = viewport;
+	const active = branchActive === undefined ? -1 : turnIndices.indexOf(branchActive);
+	return active < 0 ? rest : { ...rest, active };
 }
 
 function overlayRectangles(tui: RuntimeTui, width: number, height: number): { capturing: boolean; rect: TimelineRect }[] {
@@ -810,6 +947,8 @@ export class FullscreenTimelineRuntime implements RuntimePatchController {
 	private mouseHover: VerticalTimelineHit | undefined;
 	private timelinePressActive = false;
 	private keyboardFocus: number | undefined;
+	/** An explicitly browsed rail page, valid only while the viewport's active prompt is unchanged. */
+	private browse: { page: number; active: number | undefined } | undefined;
 	private lastMouse: { x: number; y: number } | undefined;
 	private overlayCache: { width: number; height: number; rectangles: { capturing: boolean; rect: TimelineRect }[] } | undefined;
 	private hiddenScrollbars = new Map<RuntimeScrollView, "hidden" | "auto" | "always">();
@@ -833,6 +972,7 @@ export class FullscreenTimelineRuntime implements RuntimePatchController {
 			this.mouseHover = undefined;
 			this.timelinePressActive = false;
 			this.keyboardFocus = undefined;
+			this.browse = undefined;
 			this.lastRail = undefined;
 			this.lastRailTurnIndices = [];
 			this.lastSnapshot = undefined;
@@ -858,6 +998,7 @@ export class FullscreenTimelineRuntime implements RuntimePatchController {
 		this.lastCompositeSignature = "";
 		this.mouseHover = undefined;
 		this.keyboardFocus = undefined;
+		this.browse = undefined;
 		this.timelinePressActive = false;
 		this.lastMouse = undefined;
 		this.overlayCache = undefined;
@@ -884,6 +1025,7 @@ export class FullscreenTimelineRuntime implements RuntimePatchController {
 		this.mouseHover = undefined;
 		this.lastMouse = undefined;
 		this.keyboardFocus = target;
+		this.browse = undefined;
 		this.jumpToTurn(target);
 		this.requestRender();
 		return true;
@@ -893,17 +1035,22 @@ export class FullscreenTimelineRuntime implements RuntimePatchController {
 		const event = parseTimelineMouse(data);
 		if (!event || !this.lastRail) return false;
 		this.lastMouse = { x: event.x, y: event.y };
-		const insideRail =
-			pointInRect(this.lastRail.rect, event.x, event.y) || pointInRect(this.lastRail.latestRect, event.x, event.y);
+		const insideRail = timelineRailContains(this.lastRail, event.x, event.y);
 		const occluded = this.pointIsOccluded(tui, event.x, event.y);
 		const wheel = (event.button & 64) !== 0;
 		const motion = (event.button & 32) !== 0;
 		const baseButton = event.button & 3;
 
 		if (wheel) {
-			if (this.mouseHover || this.keyboardFocus !== undefined) {
+			if (insideRail && !occluded && this.lastRail.page.count > 1 && (baseButton === 0 || baseButton === 1)) {
+				// Over a paged rail the wheel flips pages instead of scrolling the transcript.
+				this.showPage(this.lastRail.page.index + (baseButton === 0 ? -1 : 1));
+				return true;
+			}
+			if (this.mouseHover || this.keyboardFocus !== undefined || this.browse) {
 				this.mouseHover = undefined;
 				this.keyboardFocus = undefined;
+				this.browse = undefined;
 				this.requestRender();
 			}
 			return false;
@@ -939,13 +1086,16 @@ export class FullscreenTimelineRuntime implements RuntimePatchController {
 				const turns = this.host.getTurns();
 				if (turns.length > 0) this.host.select(turns.length - 1);
 				this.keyboardFocus = undefined;
+				this.browse = undefined;
 				this.lastSnapshot?.scrollView.scrollToEnd();
+			} else if (hit?.type === "older") {
+				this.showPage(this.lastRail.page.index - 1);
 			} else if (hit) {
-				const railTarget = hitTarget(this.lastRail, hit);
-				const target = railTarget === undefined ? undefined : this.lastRailTurnIndices[railTarget];
+				const target = this.lastRailTurnIndices[hit.turnIndex];
 				if (target !== undefined) {
 					this.host.select(target);
 					this.keyboardFocus = target;
+					this.browse = undefined;
 					this.jumpToTurn(target);
 				}
 			}
@@ -988,7 +1138,9 @@ export class FullscreenTimelineRuntime implements RuntimePatchController {
 		}
 		const railTurns = railTurnIndices.map((turnIndex) => turns[turnIndex]!);
 		const railViewport = projectTimelineViewport(snapshot.viewport, railTurnIndices);
-		const rail = computeVerticalTimelineRail(snapshot.box.rect, railTurns.length, railViewport);
+		const anchorRows = railTurnIndices.map((turnIndex) => snapshot.anchors.get(turnIndex)!);
+		if (this.browse && this.browse.active !== railViewport.active) this.browse = undefined;
+		const rail = computeVerticalTimelineRail(snapshot.box.rect, anchorRows, railViewport, this.browse?.page);
 		if (!rail) {
 			this.lastRail = undefined;
 			this.lastRailTurnIndices = [];
@@ -1003,20 +1155,18 @@ export class FullscreenTimelineRuntime implements RuntimePatchController {
 		this.requestRailLayoutConvergence(hadRail);
 
 		if (this.lastMouse) {
-			const overTimeline =
-				pointInRect(rail.rect, this.lastMouse.x, this.lastMouse.y) ||
-				pointInRect(rail.latestRect, this.lastMouse.x, this.lastMouse.y);
+			const overTimeline = timelineRailContains(rail, this.lastMouse.x, this.lastMouse.y);
 			const next = overTimeline && !this.pointIsOccluded(tui, this.lastMouse.x, this.lastMouse.y)
 				? hitVerticalTimelineRail(rail, this.lastMouse.x, this.lastMouse.y)
 				: undefined;
 			this.mouseHover = next;
 		}
 		const keyboardRailIndex = this.keyboardFocus === undefined ? -1 : railTurnIndices.indexOf(this.keyboardFocus);
-		const visualHover = this.mouseHover ??
-			(keyboardRailIndex >= rail.window.start && keyboardRailIndex < rail.window.end
-				? { type: "tick" as const, turnIndex: keyboardRailIndex }
-				: undefined);
-		return compositeVerticalTimeline(lines, width, snapshot.box.rect, rail, railTurns, visualHover, this.theme);
+		const visualHover =
+			this.mouseHover ?? (keyboardRailIndex >= 0 ? { type: "tick" as const, turnIndex: keyboardRailIndex } : undefined);
+		return compositeVerticalTimeline(lines, width, snapshot.box.rect, rail, railTurns, visualHover, this.theme, {
+			busy: this.host.isBusy?.() === true,
+		});
 	}
 
 	afterRender(tui: RuntimeTui): void {
@@ -1059,6 +1209,19 @@ export class FullscreenTimelineRuntime implements RuntimePatchController {
 		this.restoreScrollbars();
 		if (this.installed) uninstallRuntimePatch(this);
 		this.runtimeTui = undefined;
+	}
+
+	/** Browse a rail page without moving the transcript; the viewport's own page clears the browse. */
+	private showPage(page: number): void {
+		const rail = this.lastRail;
+		if (!rail) return;
+		const target = Math.min(Math.max(0, page), rail.page.count - 1);
+		const active = this.lastSnapshot ? projectTimelineViewport(this.lastSnapshot.viewport, this.lastRailTurnIndices).active : undefined;
+		const activePage = timelinePageOf(this.lastRailTurnIndices.length, rail.page.size, active);
+		this.browse = target === activePage ? undefined : { page: target, active };
+		this.mouseHover = undefined;
+		this.keyboardFocus = undefined;
+		this.requestRender();
 	}
 
 	private jumpToTurn(turnIndex: number): void {
@@ -1166,20 +1329,42 @@ function messageTextProjections(content: unknown): { display: string; rendered: 
 	};
 }
 
-/** Stable branch turns plus the two text projections needed by the fullscreen seam. */
+function entryTimestamp(entry: SessionEntry, message: { timestamp?: unknown }): number | undefined {
+	if (typeof message.timestamp === "number" && Number.isFinite(message.timestamp)) return message.timestamp;
+	const recorded = (entry as { timestamp?: unknown }).timestamp;
+	if (typeof recorded !== "string") return undefined;
+	const parsed = Date.parse(recorded);
+	return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function toolCallCount(content: unknown): number {
+	if (!Array.isArray(content)) return 0;
+	return content.filter((part) => (part as { type?: unknown })?.type === "toolCall").length;
+}
+
+/** Stable branch turns plus the text projections and card metadata used by the fullscreen seam. */
 export function extractTimelineTurns(entries: readonly SessionEntry[]): FullscreenTimelineTurn[] {
 	const turns: FullscreenTimelineTurn[] = [];
 	for (const entry of entries) {
 		if (entry.type !== "message") continue;
-		const message = entry.message as { role?: unknown; content?: unknown };
+		const message = entry.message as { role?: unknown; content?: unknown; timestamp?: unknown };
+		if (message?.role === "assistant") {
+			const current = turns[turns.length - 1];
+			if (current) current.toolCount += toolCallCount(message.content);
+			continue;
+		}
 		if (message?.role !== "user") continue;
 		const projections = messageTextProjections(message.content);
 		const text = sanitizePromptText(projections.display);
 		const entryId = (entry as { id?: unknown }).id;
+		const timestamp = entryTimestamp(entry, message);
 		turns.push({
 			id: typeof entryId === "string" ? entryId : `turn:${turns.length}`,
 			renderText: projections.rendered,
 			preview: timelinePromptPreview(text),
+			ordinal: turns.length + 1,
+			...(timestamp === undefined ? {} : { timestamp }),
+			toolCount: 0,
 		});
 	}
 	return turns;
@@ -1191,9 +1376,11 @@ export default function timelineExtension(pi: ExtensionAPI) {
 	let selected = 0;
 	/** Selection is pinned to the newest turn; new turns keep it there. */
 	let followTail = true;
+	let busy = false;
 	const runtime = new FullscreenTimelineRuntime({
 		getTurns: () => turns,
 		getSelected: () => selected,
+		isBusy: () => busy,
 		select: (turnIndex) => {
 			if (turns.length === 0) return;
 			selected = Math.min(Math.max(0, turnIndex), turns.length - 1);
@@ -1226,6 +1413,8 @@ export default function timelineExtension(pi: ExtensionAPI) {
 			accent: (text) => theme.fg("accent", text),
 			text: (text) => theme.fg("text", text),
 			panel: (text) => theme.bg("customMessageBg", text),
+			track: (text) => theme.fg("scrollbarTrack", text),
+			thumb: (text) => theme.fg("scrollbarThumb", text),
 		});
 		runtime.enable();
 		runtime.setVisible(true);
@@ -1252,9 +1441,15 @@ export default function timelineExtension(pi: ExtensionAPI) {
 		else refresh(ctx);
 	});
 	pi.on("session_tree", async (_event, ctx) => refreshIfVisible(ctx));
-	pi.on("agent_start", async (_event, ctx) => refreshIfVisible(ctx));
+	pi.on("agent_start", async (_event, ctx) => {
+		busy = true;
+		refreshIfVisible(ctx);
+	});
 	pi.on("turn_end", async (_event, ctx) => refreshIfVisible(ctx));
-	pi.on("agent_settled", async (_event, ctx) => refreshIfVisible(ctx));
+	pi.on("agent_settled", async (_event, ctx) => {
+		busy = false;
+		refreshIfVisible(ctx);
+	});
 
 	pi.on("session_shutdown", async () => {
 		visible = false;
@@ -1262,6 +1457,7 @@ export default function timelineExtension(pi: ExtensionAPI) {
 		turns = [];
 		selected = 0;
 		followTail = true;
+		busy = false;
 	});
 
 	pi.registerShortcut("alt+,", {
