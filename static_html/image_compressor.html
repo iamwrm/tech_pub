@@ -384,6 +384,57 @@ function encodePng(src, c) {
   });
 }
 
+/* ---------- WebP fallback worker (libwebp via jSquash WASM) ---------- */
+// Safari (and every iOS browser, all WebKit) can't encode WebP from a canvas.
+const canvasWebp = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 1;
+  return c.toDataURL('image/webp').startsWith('data:image/webp');
+})();
+const WEBP_CDN = 'https://cdn.jsdelivr.net/npm/@jsquash/webp@1.5.0/codec/enc/';
+const webpWorkerSrc = `
+let mod;
+const load = async () => {
+  try { const m = await import('${WEBP_CDN}webp_enc_simd.js'); return await m.default({ noInitialRun: true }); }
+  catch (e) { const m = await import('${WEBP_CDN}webp_enc.js'); return await m.default({ noInitialRun: true }); }
+};
+const OPTS = { quality: 75, target_size: 0, target_PSNR: 0, method: 4, sns_strength: 50, filter_strength: 60,
+  filter_sharpness: 0, filter_type: 1, partitions: 0, segments: 4, pass: 1, show_compressed: 0, preprocessing: 0,
+  autofilter: 0, partition_limit: 0, alpha_compression: 1, alpha_filtering: 1, alpha_quality: 100, lossless: 0,
+  exact: 0, image_hint: 0, emulate_jpeg_size: 0, thread_level: 0, low_memory: 0, near_lossless: 100,
+  use_delta_palette: 0, use_sharp_yuv: 0 };
+self.onmessage = async (e) => {
+  const { id, buf, w, h, q } = e.data;
+  try {
+    mod = mod || load();
+    const r = (await mod).encode(new Uint8ClampedArray(buf), w, h, { ...OPTS, quality: q });
+    if (!r) throw new Error('WebP encoding error');
+    const out = r.buffer.slice(r.byteOffset, r.byteOffset + r.byteLength);
+    self.postMessage({ id, out }, [out]);
+  } catch (err) { mod = null; self.postMessage({ id, err: 'WebP encoder unavailable (' + (err.message || err) + ')' }); }
+};`;
+let webpWorker = null;
+function getWebpWorker() {
+  if (webpWorker) return webpWorker;
+  webpWorker = new Worker(URL.createObjectURL(new Blob([webpWorkerSrc], { type: 'text/javascript' })));
+  webpWorker.onmessage = (e) => {
+    const p = wpending.get(e.data.id); if (!p) return;
+    wpending.delete(e.data.id);
+    e.data.err ? p.reject(new Error(e.data.err)) : p.resolve(new Blob([e.data.out], { type: 'image/webp' }));
+  };
+  webpWorker.onerror = () => {
+    for (const [id, p] of wpending) if (p.webp) { p.reject(new Error('WebP encoder failed to load')); wpending.delete(id); }
+    webpWorker = null;
+  };
+  return webpWorker;
+}
+function encodeWebp(src, q) {
+  const buf = src.data.buffer.slice(0);
+  return new Promise((resolve, reject) => {
+    const id = ++wid; wpending.set(id, { resolve, reject, webp: true });
+    getWebpWorker().postMessage({ id, buf, w: src.w, h: src.h, q }, [buf]);
+  });
+}
+
 /* ---------- source preparation ---------- */
 async function decode(file) {
   try { return await createImageBitmap(file); }
@@ -454,6 +505,7 @@ async function encode(img, v) {
       throw e;
     }
   }
+  if (v.fmt === 'webp' && !canvasWebp) return encodeWebp(src, v.q);
   const blob = await toBlob(v.fmt === 'jpeg' ? src.jcanvas : src.canvas, MIME[v.fmt], v.q / 100);
   if (!blob || blob.type !== MIME[v.fmt]) throw new Error(FMT_NAME[v.fmt] + ' encoding not supported by this browser');
   return blob;
