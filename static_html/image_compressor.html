@@ -170,6 +170,8 @@ body.has-images #empty { display: none; }
 #stage {
   flex: 1; overflow: auto; min-height: 0; position: relative;
   overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
+  /* pinch and double-tap are handled in JS; one finger still scrolls the page in Fit */
+  touch-action: pan-x pan-y;
   scrollbar-gutter: stable; scrollbar-width: thin;
   background-color: var(--bg);
   background-image: linear-gradient(45deg, var(--checker) 25%, transparent 25%, transparent 75%, var(--checker) 75%),
@@ -285,7 +287,7 @@ body.has-images #empty { display: none; }
       <div class="hint">
         <span><kbd>↑</kbd><kbd>↓</kbd> choose</span>
         <span><kbd>Space</kbd> hold to compare</span>
-        <span><kbd>Z</kbd> zoom</span>
+        <span><kbd>Z</kbd> zoom · <kbd>Ctrl</kbd>+scroll or pinch</span>
         <span><kbd>C</kbd> copy</span>
         <span><kbd>D</kbd> download</span>
         <span><kbd>[</kbd><kbd>]</kbd> prev / next image</span>
@@ -633,10 +635,10 @@ function updatePreview() {
 
   // keep both at the output size so compare lines up
   const stage = $('#stage');
-  stage.className = state.zoom === 'fit' ? 'fit' : (state.zoom === '2' ? 'px' : '');
+  stage.className = state.zoom === 'fit' ? 'fit' : (state.zoom >= 2 ? 'px' : '');
   if (state.zoom === 'fit') { pv.style.width = ''; pv.style.height = ''; }
   else {
-    const z = +state.zoom, dpr = window.devicePixelRatio || 1;
+    const z = state.zoom, dpr = window.devicePixelRatio || 1;
     pv.style.width = (src.w * z / dpr) + 'px'; pv.style.height = (src.h * z / dpr) + 'px';
   }
 
@@ -778,38 +780,152 @@ $('#gray').onchange = settingsChanged;
 
 $('#zoom').addEventListener('click', (e) => {
   const b = e.target.closest('button'); if (!b) return;
-  setZoom(b.dataset.z);
+  setZoom(b.dataset.z === 'fit' ? 'fit' : +b.dataset.z);
 });
+// state.zoom is 'fit' or a scale where 1 = one image pixel per device pixel
+const ZMAX = 16;
+function syncZoomButtons() {
+  document.querySelectorAll('#zoom button').forEach((b) => b.classList.toggle('on', b.dataset.z === String(state.zoom)));
+}
 function setZoom(z) {
-  state.zoom = z;
-  document.querySelectorAll('#zoom button').forEach((b) => b.classList.toggle('on', b.dataset.z === z));
+  state.zoom = z; syncZoomButtons();
   updatePreview();
   // start zoomed views centered; the user can scroll or drag to any edge
   const st = $('#stage');
   st.scrollLeft = (st.scrollWidth - st.clientWidth) / 2;
   st.scrollTop = (st.scrollHeight - st.clientHeight) / 2;
 }
+// scale at which the image just fits the stage (never above 1:1, like Fit)
+function fitZoom() {
+  const img = state.images[state.cur]; if (!img) return 1;
+  const src = img.src || { w: img.w, h: img.h }, dpr = window.devicePixelRatio || 1;
+  if (state.zoom === 'fit') { const w = $('#pv').getBoundingClientRect().width; if (w) return w * dpr / src.w; }
+  const st = $('#stage');
+  return Math.min(1, (st.clientWidth - 32) * dpr / src.w, (st.clientHeight - 32) * dpr / src.h);
+}
+// Resize to z, then scroll so the image point (u, v) (0..1 fractions) sits under client point (cx, cy).
+function applyZoom(z, u, v, cx, cy) {
+  if (!state.images[state.cur]) return;
+  state.zoom = Math.max(fitZoom() * 0.5, Math.min(ZMAX, z)); syncZoomButtons();
+  updatePreview();
+  const st = $('#stage'), r = $('#pv').getBoundingClientRect();
+  st.scrollLeft += r.left + u * r.width - cx;
+  st.scrollTop += r.top + v * r.height - cy;
+}
+function anchorAt(cx, cy) {
+  const r = $('#pv').getBoundingClientRect();
+  return { u: r.width ? (cx - r.left) / r.width : 0.5, v: r.height ? (cy - r.top) / r.height : 0.5 };
+}
+function zoomAt(z, cx, cy) { const a = anchorAt(cx, cy); applyZoom(z, a.u, a.v, cx, cy); }
+// zoomed out to (or past) Fit: snap back to Fit
+function settleZoom() {
+  if (state.zoom !== 'fit' && state.zoom <= fitZoom() * 1.02) setZoom('fit');
+}
+const curZoom = () => (state.zoom === 'fit' ? fitZoom() : state.zoom);
 
-// drag to pan when zoomed
+// mouse / pen: drag to pan when zoomed (touch is handled below)
 (() => {
   const st = $('#stage'); let pan = null;
   st.addEventListener('pointerdown', (e) => {
-    if (state.zoom === 'fit' || e.button !== 0) return;
-    // One-finger / primary pointer pans; wheel and overflow still scroll.
-    pan = { x: e.clientX, y: e.clientY, l: st.scrollLeft, t: st.scrollTop, moved: false };
+    if (e.pointerType === 'touch' || state.zoom === 'fit' || e.button !== 0) return;
+    pan = { x: e.clientX, y: e.clientY, l: st.scrollLeft, t: st.scrollTop };
     st.setPointerCapture(e.pointerId); st.classList.add('panning');
-    if (e.pointerType !== 'touch') e.preventDefault();
+    e.preventDefault();
   });
   st.addEventListener('pointermove', (e) => {
     if (!pan) return;
-    const dx = e.clientX - pan.x, dy = e.clientY - pan.y;
-    if (!pan.moved && Math.hypot(dx, dy) < 4) return;
-    pan.moved = true;
-    st.scrollLeft = pan.l - dx; st.scrollTop = pan.t - dy;
-    if (e.pointerType === 'touch') e.preventDefault();
-  }, { passive: false });
+    st.scrollLeft = pan.l - (e.clientX - pan.x); st.scrollTop = pan.t - (e.clientY - pan.y);
+  });
   const end = () => { pan = null; st.classList.remove('panning'); };
   st.addEventListener('pointerup', end); st.addEventListener('pointercancel', end);
+  // Ctrl/⌘ + wheel, which is also what a trackpad pinch sends
+  st.addEventListener('wheel', (e) => {
+    if (!(e.ctrlKey || e.metaKey) || !state.images.length) return;
+    e.preventDefault();
+    const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+    zoomAt(curZoom() * Math.exp(-dy * 0.01), e.clientX, e.clientY);
+    clearTimeout(st._wz); st._wz = setTimeout(settleZoom, 250);
+  }, { passive: false });
+})();
+
+// touch: pinch to zoom, one finger pans when zoomed (with momentum), double-tap toggles
+(() => {
+  const st = $('#stage');
+  let g = null, inertia = 0, lastTap = null;
+  const mid = (t) => ({ x: (t[0].clientX + t[1].clientX) / 2, y: (t[0].clientY + t[1].clientY) / 2 });
+  const dist = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+  const overflows = () => st.scrollWidth > st.clientWidth + 1 || st.scrollHeight > st.clientHeight + 1;
+  const stopInertia = () => { cancelAnimationFrame(inertia); inertia = 0; };
+  const startPinch = (t) => {
+    const m = mid(t), a = anchorAt(m.x, m.y);
+    g = { mode: 'pinch', d: Math.max(1, dist(t)), z: curZoom(), u: a.u, v: a.v };
+  };
+  const startPan = (t) => {
+    g = { mode: 'pan', x: t.clientX, y: t.clientY, l: st.scrollLeft, tp: st.scrollTop, vx: 0, vy: 0, ts: performance.now(), lx: t.clientX, ly: t.clientY };
+  };
+  st.addEventListener('touchstart', (e) => {
+    stopInertia();
+    if (!state.images.length) return;
+    const t = e.touches;
+    if (t.length >= 2) { e.preventDefault(); startPinch(t); return; }
+    const p = t[0];
+    g = null;
+    if (state.zoom !== 'fit' && overflows()) { e.preventDefault(); startPan(p); }
+    // remember for tap detection (in Fit the page may scroll instead; moved taps are ignored)
+    st._tap = { x: p.clientX, y: p.clientY, ts: performance.now(), moved: false };
+  }, { passive: false });
+  st.addEventListener('touchmove', (e) => {
+    const t = e.touches;
+    if (st._tap && t.length === 1 && Math.hypot(t[0].clientX - st._tap.x, t[0].clientY - st._tap.y) > 10) st._tap.moved = true;
+    if (!g) return;
+    e.preventDefault();
+    if (g.mode === 'pinch' && t.length >= 2) {
+      const m = mid(t);
+      applyZoom(g.z * dist(t) / g.d, g.u, g.v, m.x, m.y);
+    } else if (g.mode === 'pan' && t.length === 1) {
+      const p = t[0], now = performance.now(), dt = Math.max(1, now - g.ts);
+      // smoothed velocity in px/ms for the fling
+      g.vx = 0.8 * ((p.clientX - g.lx) / dt) + 0.2 * g.vx;
+      g.vy = 0.8 * ((p.clientY - g.ly) / dt) + 0.2 * g.vy;
+      g.lx = p.clientX; g.ly = p.clientY; g.ts = now;
+      st.scrollLeft = g.l - (p.clientX - g.x); st.scrollTop = g.tp - (p.clientY - g.y);
+    }
+  }, { passive: false });
+  const fling = (vx, vy) => {
+    let last = performance.now();
+    const step = (now) => {
+      const dt = now - last; last = now;
+      st.scrollLeft -= vx * dt; st.scrollTop -= vy * dt;
+      const k = Math.pow(0.995, dt); vx *= k; vy *= k;
+      inertia = Math.hypot(vx, vy) > 0.02 ? requestAnimationFrame(step) : 0;
+    };
+    inertia = requestAnimationFrame(step);
+  };
+  const end = (e) => {
+    const t = e.touches;
+    if (g && g.mode === 'pinch') {
+      if (t.length === 1) { settleZoom(); if (state.zoom !== 'fit') startPan(t[0]); else g = null; }
+      else if (!t.length) { g = null; settleZoom(); }
+      st._tap = null;
+      return;
+    }
+    if (g && g.mode === 'pan' && !t.length) {
+      if (performance.now() - g.ts < 80 && Math.hypot(g.vx, g.vy) > 0.1) fling(g.vx, g.vy);
+      g = null;
+    }
+    // double-tap: Fit -> zoom in at the tap point; zoomed -> back to Fit
+    const tap = st._tap; st._tap = null;
+    if (e.type !== 'touchend' || t.length || !tap || tap.moved || performance.now() - tap.ts > 300) return;
+    if (lastTap && tap.ts - lastTap.ts < 350 && Math.hypot(tap.x - lastTap.x, tap.y - lastTap.y) < 30) {
+      e.preventDefault(); lastTap = null; stopInertia();
+      if (state.zoom === 'fit') zoomAt(Math.min(ZMAX, Math.max(1, fitZoom() * 2.5)), tap.x, tap.y);
+      else setZoom('fit');
+    } else lastTap = tap;
+  };
+  st.addEventListener('touchend', end, { passive: false });
+  st.addEventListener('touchcancel', end);
+  // iOS Safari: keep its own page pinch out of the stage
+  st.addEventListener('gesturestart', (e) => e.preventDefault());
 })();
 
 const cmp = $('#cmp');
@@ -839,7 +955,7 @@ document.addEventListener('keydown', (e) => {
   } else if (e.key === 'd' || e.key === 'D') {
     download(state.sel);
   } else if (e.key === 'z' || e.key === 'Z') {
-    const zs = ['fit', '1', '2']; setZoom(zs[(zs.indexOf(state.zoom) + 1) % zs.length]);
+    const zs = ['fit', 1, 2]; setZoom(zs[(zs.indexOf(state.zoom) + 1) % zs.length]);
   } else if (e.key === '[' || e.key === ']') {
     const n = state.images.length;
     select((state.cur + (e.key === ']' ? 1 : -1) + n) % n);
