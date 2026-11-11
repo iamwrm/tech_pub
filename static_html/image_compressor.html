@@ -225,6 +225,11 @@ body.has-images #empty { display: none; }
 <header>
   <h1>Image Compressor<span>local · nothing uploaded</span></h1>
   <div class="controls">
+    <span class="ctl">Scale
+      <span class="seg" id="scale">
+        <button data-s="1" class="on">100%</button><button data-s="0.5">50%</button><button data-s="0.25">25%</button><button data-s="0.1">10%</button>
+      </span>
+    </span>
     <label class="ctl">Max width
       <select id="maxw">
         <option value="0">Original</option>
@@ -338,7 +343,8 @@ const fmtBytes = (n) => {
 };
 const varLabel = (v) => v.fmt === 'png' ? (v.c ? v.c + ' colors' : 'lossless') : 'q' + v.q;
 const varTag = (v) => v.fmt === 'png' ? (v.c ? 'c' + v.c : 'lossless') : 'q' + v.q;
-const settingsKey = () => $('#maxw').value + '|' + ($('#gray').checked ? 1 : 0);
+const scaleVal = () => +($('#scale .on')?.dataset.s || 1);
+const settingsKey = () => scaleVal() + '|' + $('#maxw').value + '|' + ($('#gray').checked ? 1 : 0);
 const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 let toastT;
 function toast(msg) {
@@ -450,7 +456,8 @@ function prepareSource(img) {
   const key = settingsKey();
   if (img.src && img.src.key === key) return img.src;
   const maxw = +$('#maxw').value, gray = $('#gray').checked;
-  let w = img.w, h = img.h;
+  const sc = scaleVal();
+  let w = Math.max(1, Math.round(img.w * sc)), h = Math.max(1, Math.round(img.h * sc));
   if (maxw && w > maxw) { h = Math.round(h * maxw / w); w = maxw; }
 
   // progressive halving for clean downscale
@@ -828,6 +835,11 @@ function settingsChanged() {
   prepareSource(img); renderList(); runAll(img); updatePreview();
 }
 $('#maxw').onchange = settingsChanged;
+$('#scale').addEventListener('click', (e) => {
+  const b = e.target.closest('button'); if (!b || b.classList.contains('on')) return;
+  document.querySelectorAll('#scale button').forEach((x) => x.classList.toggle('on', x === b));
+  settingsChanged();
+});
 $('#gray').onchange = settingsChanged;
 
 $('#zoom').addEventListener('click', (e) => {
