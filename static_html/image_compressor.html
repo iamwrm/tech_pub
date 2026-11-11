@@ -59,7 +59,7 @@ header h1 { font-size: 13px; font-weight: 600; letter-spacing: -.01em; }
 header h1 span { color: var(--faint); font-weight: 400; margin-left: 6px; }
 .controls { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-left: auto; }
 .ctl { display: flex; align-items: center; gap: 6px; color: var(--muted); }
-.ctl input[type=checkbox] { accent-color: var(--fg); }
+.ctl input[type=checkbox], .ctl input[type=range] { accent-color: var(--fg); }
 
 /* empty state */
 #empty { flex: 1; display: flex; align-items: center; justify-content: center; padding: 24px 16px; }
@@ -225,11 +225,10 @@ body.has-images #empty { display: none; }
 <header>
   <h1>Image Compressor<span>local · nothing uploaded</span></h1>
   <div class="controls">
-    <span class="ctl">Scale
-      <span class="seg" id="scale">
-        <button data-s="1" class="on">100%</button><button data-s="0.5">50%</button><button data-s="0.25">25%</button><button data-s="0.1">10%</button>
-      </span>
-    </span>
+    <label class="ctl">Scale
+      <input type="range" id="scale" min="1" max="100" value="100" style="width:110px">
+      <span class="num" id="scaleT" style="width:36px;text-align:right">100%</span>
+    </label>
     <label class="ctl">Max width
       <select id="maxw">
         <option value="0">Original</option>
@@ -343,7 +342,7 @@ const fmtBytes = (n) => {
 };
 const varLabel = (v) => v.fmt === 'png' ? (v.c ? v.c + ' colors' : 'lossless') : 'q' + v.q;
 const varTag = (v) => v.fmt === 'png' ? (v.c ? 'c' + v.c : 'lossless') : 'q' + v.q;
-const scaleVal = () => +($('#scale .on')?.dataset.s || 1);
+const scaleVal = () => +$('#scale').value / 100;
 const settingsKey = () => scaleVal() + '|' + $('#maxw').value + '|' + ($('#gray').checked ? 1 : 0);
 const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 let toastT;
@@ -835,10 +834,11 @@ function settingsChanged() {
   prepareSource(img); renderList(); runAll(img); updatePreview();
 }
 $('#maxw').onchange = settingsChanged;
-$('#scale').addEventListener('click', (e) => {
-  const b = e.target.closest('button'); if (!b || b.classList.contains('on')) return;
-  document.querySelectorAll('#scale button').forEach((x) => x.classList.toggle('on', x === b));
-  settingsChanged();
+// label follows the drag live; re-encode once the slider settles
+let scaleT;
+$('#scale').addEventListener('input', (e) => {
+  $('#scaleT').textContent = e.target.value + '%';
+  clearTimeout(scaleT); scaleT = setTimeout(settingsChanged, 250);
 });
 $('#gray').onchange = settingsChanged;
 
